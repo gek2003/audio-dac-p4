@@ -1,0 +1,51 @@
+# ============================================================================
+#  sdkconfig.defaults — проект audio_dac_p4 (ESP32-P4, Waveshare WIFI6-Touch-LCD-5)
+#
+#  После правки: удалить устаревший sdkconfig (или idf.py fullclean),
+#  затем idf.py reconfigure — и только потом build.
+# ============================================================================
+
+# --- ESP32-P4: дефолтная ревизия чипа v3.0 ---
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
+
+# --- PSRAM: обязательна для буферов дисплея (2 x 720x1280x2 б ~ 3,5 МБ) ---
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_250M=y        # на Waveshare-примерах 250 МГц; если нестабильно — 200
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+
+# --- Дисплей HX8394 (waveshare/esp_lcd_hx8394) ---
+# Драйвер при дефолте сам создаёт легаси-I2C шину на GPIO7/8 и вешает
+# контроллер подсветки 0x45 — конфликтует с нашей шиной (ЦАП 0x48 + GT911).
+# Отключаем: подсветку поднимает ui_display.c на общей шине.
+CONFIG_ESP_LCD_HX8394_SKIP_I2C_INIT=y
+
+# --- LVGL ---
+# Fallback-шрифты (используются, пока кириллические ui_font_ru_* не слинкованы;
+# переключение EN работает и без них, кириллица — только после слабых ссылок)
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+
+# --- Системное ---
+# Стек главной задачи: ui_init() делает тяжёлую инициализацию (DSI/LVGL/тач)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+# --- SD-карта: FATFS с длинными именами (браузер файлов) ---
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_FS_LOCK=2          # одновременный доступ UI и декодера
+CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
+
+# --- USB MSC: SD-карта как USB-диск ПК (esp_tinyusb) ---
+CONFIG_TINYUSB_MSC_ENABLED=y
+CONFIG_TINYUSB_MSC_BUFSIZE=8192   # P4: ~4.7 МБ/с чтение, ~2.1 МБ/с запись
+
+# --- Разделы и флеш: бинарник ~2.3 МБ, на дефолтной таблице не помещается ---
+# По README платы флеш 32 МБ; таблица занимает до 0x410000 (~4.1 МБ).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Waveshare ESP32-P4 Flash size 32 MB
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="32MB"

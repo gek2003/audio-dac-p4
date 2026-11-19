@@ -1,0 +1,33 @@
+# ============================================================================
+#  main/idf_component.yml — managed-зависимости (ESP Component Registry)
+#  Разрешается ESP-IDF Component Manager при первом idf.py reconfigure.
+#
+#  esp_wifi_remote  — реализация стандартного esp_wifi API для P4
+#                     (радио на ESP32-C6). Тянет esp_hosted как зависимость,
+#                     но указываем оба явно — так надёжнее при обновлениях.
+#  esp_hosted       — транспорт P4 <-> C6 по SDIO; прошивка C6 заливается
+#                     отдельно из репозитория esp-hosted.
+#                     ">=1.6": не пинуем верхнюю границу — линейка компонента
+#                     уже в 3.x (latest 3.1.0, 11.2026), а пин "^1.6" может
+#                     конфликтовать с требованиями esp_wifi_remote к версии.
+#  esp_audio_codec  — декодеры MP3/FLAC/AAC/OGG/WAV (используем MP3 и FLAC).
+#                     "~2.6": decoder.c написан под API 2.6.x (latest 2.6.2);
+#                     "*" может подтянуть будущий мажор 3.x с изменением
+#                     esp_audio_simple_dec — не рискуем сборкой.
+# ============================================================================
+dependencies:
+  idf: ">=6.0"
+
+  espressif/esp_wifi_remote: "*"
+  espressif/esp_hosted: ">=1.6"      # Wi-Fi через ESP32-C6 (esp_wifi_remote по SDIO)
+  espressif/esp_audio_codec: "~2.6"  # MP3/FLAC/WAV декодеры (esp_audio_simple_dec)
+
+  # Графическая оболочка (LVGL 9, горизонтально 1280x720):
+  lvgl/lvgl: "^9"
+  espressif/esp_lvgl_port: "^2"
+  espressif/esp_lcd_touch_gt911: "^1"    # тач GT911 (тянет esp_lcd_touch)
+  waveshare/esp_lcd_hx8394: "^2.1"       # дисплей HX8394, MIPI-DSI 2 lane
+
+  # USB MSC: SD-карта платы как USB-диск для ПК (USB OTG HS P4).
+  # v3.x: API tinyusb_msc_install_driver/new_storage_sdmmc, требует idf>=5.3
+  espressif/esp_tinyusb: "^3.0"
