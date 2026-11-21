@@ -36,6 +36,7 @@ idf_component_register(
         "usb_msc.c"
         "ui.c"
         "web_ctrl.c"
+        "ota_upd.c"
         "ui_display.c"
         "ui_touch.c"
         "main.c"
@@ -62,6 +63,7 @@ idf_component_register(
         # --- источники и декодеры ---
         esp_http_client
         esp_http_server          # веб-пульт (web_ctrl.c), порт 80
+        app_update                # esp_ota_* — обновление прошивки без кабеля
         esp-tls
         # --- managed-компоненты (имена с префиксом, как в managed_components/) ---
         espressif__esp_audio_codec  # MP3/FLAC/WAV декодер

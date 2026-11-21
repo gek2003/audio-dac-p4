@@ -45,6 +45,7 @@
 #include "playlist.h"
 #include "stations.h"
 #include "sd_card.h"
+#include "ota_upd.h"
 
 static const char *TAG = "web_ctrl";
 
@@ -163,6 +164,12 @@ static void status_json(char *b, size_t cap)
     bool seekable = false;
     decoder_progress_ext(&pos_ms, &total_ms, &seekable);
 
+    static const char *const ota_st[] = { "idle", "running", "ok", "fail" };
+    char esc_ota[160];
+    json_escape(ota_upd_msg(), esc_ota, sizeof(esc_ota));
+    char esc_ver[80];
+    json_escape(ota_upd_version(), esc_ver, sizeof(esc_ver));
+
     float db = (s_hooks.get_volume_db ? s_hooks.get_volume_db() : -127.5f);
     /* проценты: 0 дБ -> 100%, -127.5 дБ -> 0% (линейно, как слайдер UI) */
     int pct = (int)((-db / 127.5f) * 100.0f + 0.5f);
@@ -194,7 +201,8 @@ static void status_json(char *b, size_t cap)
         "\"pos_ms\":%lu,\"total_ms\":%lu,\"seekable\":%s,"
         "\"pl_count\":%d,\"pl_index\":%d,\"stations\":%d,"
         "\"ssid\":\"%s\",\"ip\":\"%s\",\"uptime_s\":%llu,"
-        "\"sd\":%s}",
+        "\"sd\":%s,\"ver\":\"%s\","
+        "\"ota\":{\"state\":\"%s\",\"pct\":%d,\"msg\":\"%s\"}}",
         state, src_kind(src), esc_src,
         db, pct, (s_hooks.get_mute && s_hooks.get_mute()) ? "true" : "false",
         s_hooks.get_filter ? s_hooks.get_filter() : -1,
@@ -204,7 +212,9 @@ static void status_json(char *b, size_t cap)
         playlist_count(), playlist_index(), stations_count(),
         ssid, ip,
         (unsigned long long)(esp_timer_get_time() / 1000000ULL),
-        sd_card_ready() ? "true" : "false");
+        sd_card_ready() ? "true" : "false",
+        esc_ver,
+        ota_st[ota_upd_state()], ota_upd_progress(), esc_ota);
 }
 
 static esp_err_t api_status(httpd_req_t *req)
@@ -480,6 +490,52 @@ static esp_err_t api_station(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t api_ota(httpd_req_t *req)
+{
+    char file[256], url[600];
+    esp_err_t e = ESP_FAIL;
+    bool have_file = (get_query(req, "file", file, sizeof(file)) > 0);
+    bool have_url  = !have_file && (get_query(req, "u", url, sizeof(url)) > 0);
+
+    if (!have_file && !have_url) {
+        /* без параметров — только статус */
+        char buf[192], m[128];
+        json_escape(ota_upd_msg(), m, sizeof(m));
+        snprintf(buf, sizeof(buf), "{\"ota\":{\"state\":\"%s\",\"pct\":%d,\"msg\":\"%s\"}}",
+                 (ota_upd_state() == OTA_UPD_IDLE) ? "idle"
+                 : (ota_upd_state() == OTA_UPD_RUNNING) ? "running"
+                 : (ota_upd_state() == OTA_UPD_OK) ? "ok" : "fail",
+                 ota_upd_progress(), m);
+        send_json(req, buf, 200);
+        return ESP_OK;
+    }
+
+    if (have_file) {
+        e = ota_upd_start_file(file);
+    } else {
+        if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+            send_json(req, "{\"err\":\"only http(s)://\"}", 400);
+            return ESP_OK;
+        }
+        e = ota_upd_start_url(url);
+    }
+
+    if (e == ESP_OK) {
+        send_json(req, "{\"ok\":true,\"reboot\":\"auto after write\"}", 200);
+        return ESP_OK;
+    }
+    const char *err = (e == ESP_ERR_INVALID_STATE) ? "already running"
+                    : (e == ESP_ERR_NOT_SUPPORTED) ? "no ota partition"
+                    : (e == ESP_ERR_NOT_FOUND) ? "file not found"
+                    : (e == ESP_ERR_INVALID_SIZE) ? "bad size"
+                    : (e == ESP_ERR_INVALID_ARG) ? "bad arg" : "error";
+    char m[128], buf[256];
+    json_escape(ota_upd_msg(), m, sizeof(m));
+    snprintf(buf, sizeof(buf), "{\"err\":\"%s\",\"msg\":\"%s\"}", err, m);
+    send_json(req, buf, 400);
+    return ESP_OK;
+}
+
 /* --------------------------- Диагностика ---------------------------------- */
 
 static esp_err_t api_diag(httpd_req_t *req)
@@ -537,6 +593,12 @@ static const char PAGE_HTML[] =
 "<button onclick=\"playUrl()\">GO</button></div>"
 "<div class='lbl'>SD files</div><ul id='fl'></ul>"
 "<div class='lbl'>Radio stations</div><ul id='stl'></ul>"
+"<div class='lbl'>Firmware</div>"
+"<div class='row'>"
+"<input type='text' id='otaurl' placeholder='http://... firmware.bin'>"
+"<button onclick='otaFromUrl()'>URL</button>"
+"<button onclick='otaFromSd()'>SD</button></div>"
+"<div id='otast' class='dim'></div>"
 "<script>"
 "let scrubbing=false,stations=[];"
 "const $=id=>document.getElementById(id);"
@@ -591,6 +653,12 @@ static const char PAGE_HTML[] =
 "li.onclick=()=>fetch('/api/station?i='+idx,{method:'POST'}).then(tick);"
 "el.appendChild(li)})})}"
 "loadStations();"
+"function otaFromUrl(){const u=$('otaurl').value.trim();if(!u)return;"
+"api('/api/ota?u='+encodeURIComponent(u)).then(j=>{$('otast').textContent=j.err?j.err+' '+j.msg:'started';tick()})}"
+"function otaFromSd(){api('/api/ota?file=firmware.bin').then(j=>{$('otast').textContent=j.err?j.err+' '+j.msg:'started (firmware.bin)';tick()})}"
+"function otaTick(){fetch('/api/status').then(r=>r.json()).then(j=>{const o=j.ota||{};"
+"$('otast').textContent=o.state=='idle'?'':(o.state+' '+(o.pct>=0?o.pct+'% ':'')+(o.msg||''))});}"
+"setInterval(otaTick,2000);otaTick();"
 "</script></body></html>";
 
 static esp_err_t page_handler(httpd_req_t *req)
@@ -655,6 +723,7 @@ esp_err_t web_ctrl_start(const ui_hooks_t *hooks)
         { .uri = "/api/stations", .method = HTTP_GET,     .handler = api_stations  },
         { .uri = "/api/station",  .method = HTTP_POST,    .handler = api_station   },
         { .uri = "/api/diag",     .method = HTTP_GET,     .handler = api_diag      },
+        { .uri = "/api/ota",      .method = HTTP_POST,    .handler = api_ota       },
         { .uri = "*",             .method = HTTP_OPTIONS, .handler = opts_handler  },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {

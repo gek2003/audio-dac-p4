@@ -41,8 +41,9 @@ CONFIG_FATFS_VFS_FSTAT_BLKSIZE=4096
 CONFIG_TINYUSB_MSC_ENABLED=y
 CONFIG_TINYUSB_MSC_BUFSIZE=8192   # P4: ~4.7 МБ/с чтение, ~2.1 МБ/с запись
 
-# --- Разделы и флеш: бинарник ~2.3 МБ, на дефолтной таблице не помещается ---
-# По README платы флеш 32 МБ; таблица занимает до 0x410000 (~4.1 МБ).
+# --- OTA: кастомная таблица разделов (partitions.csv: ota_0 + ota_1) ---
+# ВНИМАНИЕ: первая прошивка этой таблицы — только по кабелю (idf.py fullclean
+# и reconfigure обязательны; таблица затирает старую разметку flash).
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
