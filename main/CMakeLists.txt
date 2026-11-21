@@ -35,6 +35,7 @@ idf_component_register(
         "dsd_dec.c"
         "usb_msc.c"
         "ui.c"
+        "web_ctrl.c"
         "ui_display.c"
         "ui_touch.c"
         "main.c"
@@ -60,6 +61,7 @@ idf_component_register(
         nvs_flash
         # --- источники и декодеры ---
         esp_http_client
+        esp_http_server          # веб-пульт (web_ctrl.c), порт 80
         esp-tls
         # --- managed-компоненты (имена с префиксом, как в managed_components/) ---
         espressif__esp_audio_codec  # MP3/FLAC/WAV декодер

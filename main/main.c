@@ -39,6 +39,7 @@
 #include "usb_msc.h"
 #include "playlist.h"
 #include "ui.h"
+#include "web_ctrl.h"
 
 static const char *TAG = "main";
 
@@ -559,6 +560,10 @@ void app_main(void)
         ESP_LOGW(TAG, "Wi-Fi не подключился за 30 с (%s) — сеть недоступна",
                  esp_err_to_name(werr));
     }
+
+    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) ---.
+     * Стартует всегда: без Wi-Fi слушает вхолостую, IP появится при подключении. */
+    (void)web_ctrl_start(&s_ui_hooks);
 
     /* --- SD-карта: инициализация + USB MSC (карта как USB-диск ПК) --- */
     esp_err_t sderr = sd_card_init();
