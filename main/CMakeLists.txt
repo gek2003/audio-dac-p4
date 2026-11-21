@@ -34,9 +34,10 @@ idf_component_register(
         "stations.c"
         "dsd_dec.c"
         "usb_msc.c"
+        "web_ctrl.c"          # веб-пульт: HTTP-сервер порт 80
+        "ota_upd.c"           # OTA-обновление прошивки (SD/URL)
+        "usb_flash.c"         # флешка на OTG FS (GPIO24/25) как источник
         "ui.c"
-        "web_ctrl.c"
-        "ota_upd.c"
         "ui_display.c"
         "ui_touch.c"
         "main.c"
@@ -62,8 +63,8 @@ idf_component_register(
         nvs_flash
         # --- источники и декодеры ---
         esp_http_client
-        esp_http_server          # веб-пульт (web_ctrl.c), порт 80
-        app_update                # esp_ota_* — обновление прошивки без кабеля
+        esp_http_server              # веб-пульт (web_ctrl.c)
+        app_update                   # esp_ota_* (ota_upd.c)
         esp-tls
         # --- managed-компоненты (имена с префиксом, как в managed_components/) ---
         espressif__esp_audio_codec  # MP3/FLAC/WAV декодер
@@ -77,4 +78,6 @@ idf_component_register(
         sdmmc                       # sdmmc_cmd (проба карты, print_info)
         fatfs                       # esp_vfs_fat (FatFS поверх SD)
         espressif__esp_tinyusb      # USB MSC: карта как USB-диск ПК
+        espressif__usb_host_msc     # флешка как источник (usb_flash.c)
+        espressif__usb              # usb_host стек (OTG FS)
 )

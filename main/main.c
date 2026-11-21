@@ -40,6 +40,7 @@
 #include "playlist.h"
 #include "ui.h"
 #include "web_ctrl.h"
+#include "usb_flash.h"
 
 static const char *TAG = "main";
 
@@ -510,6 +511,24 @@ static void init_nvs(void)
     }
 }
 
+/* --- Флешка на USB OTG FS (usb_flash.c): хуки жизненного цикла --- */
+static void usb_on_mounted(void)
+{
+    ESP_LOGI(TAG, "USB: флешка смонтирована в /usb");
+}
+
+static void usb_on_unmounted(void)
+{
+    /* Извлечение во время воспроизведения — глушим декодер, иначе stdio
+     * чтение с исчезнувшего носителя даст поток ошибок. */
+    if (strncmp(s_url, "file:///usb/", 12) == 0) {
+        if (decoder_running()) {
+            decoder_stop();
+        }
+        ESP_LOGW(TAG, "USB: флешка извлечена — воспроизведение остановлено");
+    }
+}
+
 void app_main(void)
 {
     init_nvs();
@@ -561,7 +580,7 @@ void app_main(void)
                  esp_err_to_name(werr));
     }
 
-    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) ---.
+    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) ---
      * Стартует всегда: без Wi-Fi слушает вхолостую, IP появится при подключении. */
     (void)web_ctrl_start(&s_ui_hooks);
 
@@ -579,6 +598,17 @@ void app_main(void)
                      esp_err_to_name(uerr));
         }
     }
+
+    /* --- Флешка на втором USB-порту (OTG FS, GPIO24/25) ---
+     * Хост-стек на периферии 1 (USB_DWC_FS); TinyUSB MSC (SD как диск ПК)
+     * живёт на HS — независимы. Хуки: извлечение глушит воспроизведение
+     * с /usb. Флешка появляется в /usb; играть — через веб-пульт
+     * (переключатель SD/USB) или /api/playfile?p=...&root=usb. */
+    usb_flash_set_hooks(&(usb_flash_hooks_t){
+        .on_mounted   = usb_on_mounted,
+        .on_unmounted = usb_on_unmounted,
+    });
+    (void)usb_flash_init();
 
     /* --- Воспроизведение --- */
     /* SD-карта — источник по умолчанию: если готова и на ней есть аудиофайл,

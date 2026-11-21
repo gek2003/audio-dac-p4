@@ -31,3 +31,7 @@ dependencies:
   # USB MSC: SD-карта платы как USB-диск для ПК (USB OTG HS P4).
   # v3.x: API tinyusb_msc_install_driver/new_storage_sdmmc, требует idf>=5.3
   espressif/esp_tinyusb: "^3.0"
+  
+    # USB-host флешка (OTG FS P4, GPIO24/25): BOT/SCSI драйвер поверх usb_host.
+  # Компонент usb (usb_host) подтянется транзитивно (public-зависимость).
+  espressif/usb_host_msc: "^1.3.0"

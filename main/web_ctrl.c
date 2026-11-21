@@ -45,6 +45,7 @@
 #include "playlist.h"
 #include "stations.h"
 #include "sd_card.h"
+#include "usb_flash.h"
 #include "ota_upd.h"
 
 static const char *TAG = "web_ctrl";
@@ -338,31 +339,52 @@ static bool is_audio_name(const char *name)
     return false;
 }
 
-/* Относительный путь -> абсолютный под /sdcard. Без ".." и вылезания. */
-static bool safe_sd_path(const char *rel, char *out, size_t cap)
+/* Относительный путь -> абсолютный. root: "sd" (по умолчанию) -> /sdcard,
+ * "usb" -> /usb (флешка). Без ".." и вылезания за корень носителя. */
+static bool safe_media_path(const char *rel, const char *root, char *out, size_t cap)
 {
     if (rel[0] == '/') rel++;
     if (strstr(rel, "..") != NULL) return false;
     if (rel[0] == '\0') {
-        snprintf(out, cap, "%s", WEB_SD_ROOT);
+        snprintf(out, cap, "%s", root);
     } else {
-        snprintf(out, cap, "%s/%s", WEB_SD_ROOT, rel);
+        snprintf(out, cap, "%s/%s", root, rel);
+    }
+    return true;
+}
+
+/* Определить корень запроса (root=sd|usb) и его абсолютный путь. */
+static bool query_root(httpd_req_t *req, const char **root, char rootname[8])
+{
+    char r[8];
+    if (get_query(req, "root", r, sizeof(r)) > 0 && strcasecmp(r, "usb") == 0) {
+        if (!usb_flash_mounted()) return false;
+        *root = "/usb";
+        snprintf(rootname, 8, "usb");
+    } else {
+        *root = WEB_SD_ROOT;
+        snprintf(rootname, 8, "sd");
     }
     return true;
 }
 
 static esp_err_t api_files(httpd_req_t *req)
 {
-    char rel[256];
+    char rel[256], rootname[8] = "sd";
     if (get_query(req, "path", rel, sizeof(rel)) < 0) {
         rel[0] = '\0';
     }
+    const char *root = WEB_SD_ROOT;
+    if (!query_root(req, &root, rootname)) {
+        send_json(req, "{\"err\":\"USB not mounted\"}", 400);
+        return ESP_OK;
+    }
     char full[300];
-    if (!safe_sd_path(rel, full, sizeof(full))) {
+    if (!safe_media_path(rel, root, full, sizeof(full))) {
         send_json(req, "{\"err\":\"bad path\"}", 400);
         return ESP_OK;
     }
-    if (!sd_card_ready()) {
+    if (rootname[0] == 's' && !sd_card_ready()) {
         send_json(req, "{\"err\":\"SD not ready\"}", 500);
         return ESP_OK;
     }
@@ -428,13 +450,18 @@ static esp_err_t api_files(httpd_req_t *req)
 
 static esp_err_t api_playfile(httpd_req_t *req)
 {
-    char rel[256];
+    char rel[256], rootname[8] = "sd";
     if (get_query(req, "p", rel, sizeof(rel)) <= 0) {
         send_json(req, "{\"err\":\"need p=<path>\"}", 400);
         return ESP_OK;
     }
+    const char *root = WEB_SD_ROOT;
+    if (!query_root(req, &root, rootname)) {
+        send_json(req, "{\"err\":\"USB not mounted\"}", 400);
+        return ESP_OK;
+    }
     char full[300];
-    if (!safe_sd_path(rel, full, sizeof(full))) {
+    if (!safe_media_path(rel, root, full, sizeof(full))) {
         send_json(req, "{\"err\":\"bad path\"}", 400);
         return ESP_OK;
     }
@@ -591,7 +618,9 @@ static const char PAGE_HTML[] =
 "<div class='row'>"
 "<input type='text' id='url' placeholder='http://... radio or file'>"
 "<button onclick=\"playUrl()\">GO</button></div>"
-"<div class='lbl'>SD files</div><ul id='fl'></ul>"
+"<div class='lbl'>SD / USB files</div>"
+"<div class='row'><button id='btsd' onclick='setRoot(\"sd\")'>SD</button>"
+"<button id='btusb' onclick='setRoot(\"usb\")'>USB</button></div><ul id='fl'></ul>"
 "<div class='lbl'>Radio stations</div><ul id='stl'></ul>"
 "<div class='lbl'>Firmware</div>"
 "<div class='row'>"
@@ -628,8 +657,13 @@ static const char PAGE_HTML[] =
 "$('tm').textContent=j.total_ms?tm(j.pos_ms)+' / '+tm(j.total_ms):''}"
 "})}"
 "setInterval(tick,2000);tick();"
+"let curRoot='sd';"
+"function setRoot(r){curRoot=r;"
+"$('btsd').style.background=r=='sd'?'#4a7ba6':'#3a4148';"
+"$('btusb').style.background=r=='usb'?'#4a7ba6':'#3a4148';"
+"loadFiles('')}"
 "function loadFiles(p){"
-"fetch('/api/files'+(p?'?path='+encodeURIComponent(p):''))"
+"fetch('/api/files?root='+curRoot+(p?'&path='+encodeURIComponent(p):''))"
 ".then(r=>r.json()).then(j=>{const el=$('fl');el.innerHTML='';"
 "if(j.err){el.innerHTML=\"<li class='dim'>\"+j.err+'</li>';return}"
 "if(p){const li=document.createElement('li');li.textContent='.. (up)';"
@@ -641,9 +675,9 @@ static const char PAGE_HTML[] =
 "li.textContent=(it.dir?'[DIR] ':'')+it.name;"
 "const full=p?(p.endsWith('/')?p:p+'/'+it.name):it.name;"
 "li.onclick=()=>it.dir?loadFiles(full)"
-":api('/api/playfile?p='+encodeURIComponent(full)).then(()=>{});"
+":api('/api/playfile?p='+encodeURIComponent(full)+'&root='+curRoot).then(()=>{});"
 "el.appendChild(li)})})}"
-"loadFiles('');"
+"setRoot('sd');"
 "function loadStations(){"
 "fetch('/api/stations').then(r=>r.json()).then(j=>{stations=j.items||[];"
 "const el=$('stl');el.innerHTML='';"
