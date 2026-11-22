@@ -108,8 +108,8 @@
 - Эндпойнты: GET / (HTML-пульт), GET /api/status, POST /api/volume?v=0..100, POST /api/mute[?on=], POST /api/play, POST /api/next|prev, POST /api/seek?ms= (MP3/DSD, включая DST-DFF), POST /api/src?u=, GET /api/files?path=[&root=usb|sd][&off=0&lim=200] (пагинация: ответ содержит count/off/items, веб-подгружает по 100 записей, «… ещё N» внизу), POST /api/playfile?p=[&root=usb], GET /api/stations, POST /api/station?i=, GET /api/diag, POST /api/phono, POST /api/hpf?v=0|1|2, POST /api/dsd?v=0|1 (DoP/Native), POST /api/ota?file=|u=.
 - HTML-пульт: статус (state/IP/SSID/vol/fs/dsd/hpf), прогресс с кликом-перемоткой (если seekable), слайдер громкости, play/prev/next, URL источника, навигация по SD/USB и станции, блок DSD mode (DoP/Native), кнопка PHONO и блок Phono subsonic HPF. Обновление статуса раз в 2 с. CORS включён.
 - Безопасность: без аутентификации (домашняя сеть; не выставлять в интернет).
-- Ограничения: смена источника не блокирует httpd (асинхронный decoder_request, P2) (рестарт декодера); громкость с телефона не отражается на слайдере экрана до пересборки UI (TODO: лёгкая синхронизация в prog_tick); хуки не мьютексированы (как и для UI).
-- Подсказка DSD mode: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и применение со следующего DSD-трека
+- Ограничения: смена источника не блокирует httpd (асинхронный decoder_request, P2); громкость с телефона не отражается на слайдере экрана до пересборки UI (TODO: лёгкая синхронизация в prog_tick).
+- Подсказка DSD mode: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и применение со следующего DSD-трека.
 
 ### 12. OTA-обновление прошивки (ota_upd.c)
 - Требуется таблица разделов `partitions.csv` (ota_0 + ota_1, идёт в патче): дефолтная single-app таблица OTA не поддерживает. Первая прошивка этой таблицы — **только по кабелю**: `idf.py fullclean`, затем `reconfigure` (в sdkconfig.defaults добавлена `CONFIG_PARTITION_TABLE_CUSTOM`), затем `flash`. После этого обновления — без кабеля.
@@ -255,7 +255,7 @@ idf.py build flash monitor
 - `v1.2-phono_adc_patch` — фикс вызова i2s_new_channel в phono_adc, чистая сборка.
 - `dsd_dst_patch` — первый патч DST/native-DSD (содержал ошибки сборки, оставлен в истории).
 - `dsd_p1p2_fix_patch` — фичи DST + native DSD поверх восстановленных фикс-правок (веб-пульт и флешка возвращены в main.c, добавлен i2s_out.h, OTA-confirm, NVS-фиксы web_ctrl, обновлён dependencies.lock).
-- `player_p2p3_patch` —  **актуальный**
+- `player_p2p3_patch` — **актуальный**: P2 (асинхронный `decoder_request`, мьютексы декодера и хуков), P3 (пагинация `/api/files`, счётчик DST-ошибок, подсказка DSD mode в вебе); исправлены регрессии патча (API `i2s_new_channel`, `c->hpf` в тесте, use-after-free, недостающие include, отсутствовавший `decoder_request`).
 
 ## Важно про зависимости
 
@@ -282,8 +282,6 @@ idf.py build flash monitor
 2. **Эквалайзер** — ESS имеет слоты для пользовательской коррекции FIR; можно сделать 3-полосный EQ с UI.
 3. **Многозадачная очередь декодера** — сейчас один источник; под плейлисты придётся расширить (или держать 2-й декодер в стопе).
 4. **Бенч native DSD** — TX-slave P4, фазировка двух портов, пайка DATA2/DATA_CLK (см. 15.1).
-
-(Перенесено в основные разделы как реализованное: веб-пульт — 11, АЦП-тракт WM8782 — 14, USB-host флешка — 13, OTA-обновление — 12, Native DSD — 15.1, DST-сжатие DFF — 15.2.)
 
 ### Известные ограничения (не баги, а осознанные решения)
 - Пароль Wi-Fi хранится в NVS открытым текстом — приемлемо для домашнего плеера, ключ `wifi_pass` в NVS можно стереть.
