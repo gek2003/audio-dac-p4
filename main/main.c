@@ -41,6 +41,8 @@
 #include "ui.h"
 #include "web_ctrl.h"
 #include "usb_flash.h"
+#include "dsd_native.h"
+#include "dsd_dec.h"
 
 static const char *TAG = "main";
 
@@ -64,6 +66,7 @@ static bool s_was_file_playing;   /* декодер играл file:// в мом
 #define VOL_NVS_KEY             "vol_half_db"
 #define FLT_NVS_KEY             "flt_shape"
 #define FIR_NVS_KEY             "fir_sel"
+#define DSD_MODE_NVS_KEY        "dsd_mode"
 #define VOL_DEFAULT_DB          (-25.0f)
 #define FLT_DEFAULT_SHAPE       7   /* как в es9039_init(): MP slow low disp */
 #define FIR_DEFAULT_SEL         0   /* авто: набор под поток */
@@ -640,6 +643,8 @@ void app_main(void)
      * первой смене частоты. Без отложенной записи: только прочитали — писать
      * обратно незачем. Можно ставить и до старта декодера. */
     vol_apply(vol_load_db());
+    /* Режим DSD: 0 = DoP (штатно), 1 = Native (требует проводки DATA2/DATA_CLK) */
+    dsd_play_mode_set((dsd_play_mode_t)persist_load_u8(DSD_MODE_NVS_KEY, 0, 0, 1));
     s_filter_sel = persist_load_u8(FLT_NVS_KEY, FLT_DEFAULT_SHAPE, 0, 7);
     flt_apply_by_index(s_filter_sel);
     s_fir_sel = persist_load_u8(FIR_NVS_KEY, FIR_DEFAULT_SEL, 0, 7);

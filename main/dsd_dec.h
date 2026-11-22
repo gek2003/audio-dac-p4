@@ -62,6 +62,14 @@ esp_err_t dsd_seek_ms(dsd_handle_t h, uint32_t ms);
 /* Частота DSD-сэмплов файла (0 если не открыт). */
 uint32_t dsd_get_rate(dsd_handle_t h);
 
+/* Сырой DSD-поток (интерлив L,R, MSB-first) — для native DSD (без DoP-маркеров). */
+size_t dsd_read_raw(dsd_handle_t h, uint8_t *out, size_t max_bytes, bool *eof);
+
+/* Режим воспроизведения DSD: DoP (штатно) или Native (dsd_native.c). */
+typedef enum { DSD_MODE_DOP = 0, DSD_MODE_NATIVE = 1 } dsd_play_mode_t;
+void dsd_play_mode_set(dsd_play_mode_t m);
+dsd_play_mode_t dsd_play_mode_get(void);
+
 /* ID3-метаданные в конце DSF (metadata pointer из заголовка). */
 uint64_t dsd_get_id3_offset(dsd_handle_t h);
 size_t   dsd_read_id3(dsd_handle_t h, uint8_t *buf, size_t cap);

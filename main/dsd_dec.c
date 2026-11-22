@@ -10,11 +10,17 @@
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "esp_log.h"
+#include "esp_err.h"
 
 #include "dsd_dec.h"
+#include "dst_dec.h"
 
+typedef struct dsd_ctx_s dsd_ctx_t;   /* определение структуры ниже (до первого использования) */
+
+static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size);
 static const char *TAG = "dsd_dec";
 
 #define DSD_BLOCK_SIZE_DSF   4096   /* блок данных на канал в DSF */
@@ -33,7 +39,7 @@ struct dsd_ctx_s {
     uint64_t bytes_left_per_ch;    /* сколько валидных байтов данных осталось (на канал) */
     uint64_t bytes_total_per_ch;   /* всего валидных байтов данных (на канал) */
     uint64_t samples_per_ch;       /* DSD-сэмплов на канал (для длительности) */
-    uint64_t data_off;             /* офсет данных в файле (DSF и DFF) */
+    uint64_t data_off;             /* офсет данных в файле (DSF) */
     uint64_t id3_off;              /* офсет ID3-метаданных (DSF: metadata ptr; DFF: 0) */
 
     /* DSF: channel-blocked данные (супергруппа = block_size байт на канал) */
@@ -51,9 +57,20 @@ struct dsd_ctx_s {
 
     /* DoP-состояние */
     uint32_t frame_cnt;            /* стерео-фреймов с начала потока (для маркера) */
-};
 
-typedef struct dsd_ctx_s dsd_ctx_t;
+    /* DST-сжатые DFF: под-чанки FRTE/DSTF/DSTC внутри чанка "DST " */
+    bool      is_dst;
+    uint64_t  dst_num_frames;
+    uint64_t  dst_start_off;
+    uint64_t  dst_dsd_left_per_ch;
+    uint64_t  dst_frame_idx;
+    dst_handle_t dst_dec;
+    uint8_t  *dst_fbuf;
+    size_t    dst_fcap;
+    uint8_t  *dst_out;
+    size_t    dst_out_pos, dst_out_len;
+    uint8_t  *dst_prev;
+};
 
 /* --------------------------- DSF ------------------------------------------ */
 
@@ -85,6 +102,12 @@ static esp_err_t parse_dsf(dsd_ctx_t *ctx)
     }
 
     const uint8_t *fm = &hdr[fmt_off];
+    /* DSF format id: 0 = DSD, 1 = DST (в DSF встречается — не поддерживаем) */
+    if (le32(fm + 16) != 0) {
+        ESP_LOGE(TAG, "DSF: format id=%lu (DST в DSF) — не поддерживается, используйте DFF",
+                 (unsigned long)le32(fm + 16));
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     /* Структура fmt DSF (сверено с ffmpeg libavformat/dsfdec.c, chunk size = 52):
      *  0..3 "fmt ", 4..11 size, 12..15 version (=1), 16..19 format id (=0),
      *  20..23 channel type (u32), 24..27 channel num (u32),
@@ -198,15 +221,23 @@ static esp_err_t parse_dff(dsd_ctx_t *ctx)
         } else if (memcmp(ch, "CMPR", 4) == 0 && sz >= 4) {
             uint8_t b[4];
             if (fread(b, 1, 4, ctx->f) != 4) break;
-            if (memcmp(b, "DSD ", 4) != 0) {
-                ESP_LOGE(TAG, "DFF: сжатие DST не поддерживается");
+            if (memcmp(b, "DSD ", 4) == 0) {
+                cmpr_ok = true;
+            } else if (memcmp(b, "DST ", 4) == 0) {
+                ctx->is_dst = true;
+                cmpr_ok = true;
+            } else {
+                ESP_LOGE(TAG, "DFF: неизвестная компрессия %.4s", (const char *)b);
                 return ESP_ERR_NOT_SUPPORTED;
             }
-            cmpr_ok = true;
             if (sz > 4 && fseek(ctx->f, (long)(sz - 4), SEEK_CUR) != 0) break;
+        } else if (memcmp(ch, "DST ", 4) == 0 && ctx->is_dst) {
+            esp_err_t e = parse_dst_container(ctx, sz);
+            if (e != ESP_OK) return e;
+            have_dsd = true;
+            break;
         } else if (memcmp(ch, "DSD ", 4) == 0) {
-            dsd_size = sz;      /* данные начинаются сразу после заголовка чанка */
-            ctx->data_off = (uint64_t)ftell(ctx->f);   /* начало данных (для seek) */
+            dsd_size = sz;
             have_dsd = true;
         } else if (sz == 0) {
             /* чанк без тела при нулевом размере: иначе цикл зациклится */
@@ -238,6 +269,143 @@ static esp_err_t parse_dff(dsd_ctx_t *ctx)
     ctx->stream_left = dsd_size;
     ctx->bytes_total_per_ch = dsd_size / ctx->channels;
     return ESP_OK;
+}
+
+/* --------------------------- DST-контейнер (DFF) --------------------------- */
+
+static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size)
+{
+    uint8_t h12[12];
+    uint64_t pos = 0;
+
+    if (fread(h12, 1, 12, ctx->f) != 12) return ESP_ERR_NOT_SUPPORTED;
+    pos += 12;
+    if (memcmp(h12, "FRTE", 4) != 0) {
+        ESP_LOGE(TAG, "DST: первый под-чанк не FRTE");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (pos + 6 > chunk_size) return ESP_ERR_NOT_SUPPORTED;
+    uint8_t fr[6];
+    if (fread(fr, 1, 6, ctx->f) != 6) return ESP_ERR_NOT_SUPPORTED;
+    pos += 6;
+    ctx->dst_num_frames = be32(fr);
+    uint16_t frate = (uint16_t)((fr[4] << 8) | fr[5]);
+    if (frate != 75) {
+        ESP_LOGE(TAG, "DST: frameRate=%u — поддерживается только 75 Гц", frate);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (pos & 1) pos++;
+
+    long cur = ftell(ctx->f);
+    if (cur < 0) return ESP_ERR_INVALID_STATE;
+    ctx->dst_start_off = (uint64_t)cur;
+
+    uint64_t frames_seen = 0;
+    while (pos < chunk_size) {
+        if (fread(h12, 1, 12, ctx->f) != 12) break;
+        pos += 12;
+        uint64_t sz = be64(h12 + 4);
+        if (memcmp(h12, "DSTF", 4) == 0) frames_seen++;
+        if (sz > (1ULL << 40)) return ESP_ERR_NOT_SUPPORTED;
+        if (fseek(ctx->f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) break;
+        pos += sz + (sz & 1);
+    }
+    if (frames_seen == 0 || ctx->dst_num_frames == 0) {
+        ESP_LOGE(TAG, "DST: DSTF-фреймов не найдено");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (frames_seen != ctx->dst_num_frames) {
+        ESP_LOGW(TAG, "DST: FRTE=%llu фреймов, фактически %llu",
+                 (unsigned long long)ctx->dst_num_frames, (unsigned long long)frames_seen);
+        ctx->dst_num_frames = frames_seen;
+    }
+
+    uint32_t frame_dsd_bits = ctx->dsd_rate / 75;
+    ctx->samples_per_ch = (uint64_t)ctx->dst_num_frames * frame_dsd_bits;
+    ctx->bytes_total_per_ch = (uint64_t)ctx->dst_num_frames * (frame_dsd_bits / 8);
+    ctx->bytes_left_per_ch = ctx->bytes_total_per_ch;
+    ctx->dst_dsd_left_per_ch = ctx->bytes_total_per_ch;
+
+    size_t fb_total = (size_t)(frame_dsd_bits / 8) * ctx->channels;
+    ctx->dst_fcap = (size_t)(frame_dsd_bits / 8) * ctx->channels + 4096;
+    ctx->dst_fbuf = malloc(ctx->dst_fcap);
+    ctx->dst_out = malloc(fb_total);
+    ctx->dst_prev = malloc(fb_total);
+    if (!ctx->dst_fbuf || !ctx->dst_out || !ctx->dst_prev) return ESP_ERR_NO_MEM;
+    memset(ctx->dst_prev, 0x69, fb_total);
+    ctx->dst_out_pos = 0; ctx->dst_out_len = 0;
+    return ESP_OK;
+}
+
+static esp_err_t dsd_dst_next_frame(dsd_ctx_t *ctx)
+{
+    while (1) {
+        uint8_t h12[12];
+        if (fread(h12, 1, 12, ctx->f) != 12) return ESP_ERR_NOT_FOUND;
+        uint64_t sz = be64(h12 + 4);
+        if (memcmp(h12, "DSTF", 4) == 0) {
+            if (sz > ctx->dst_fcap) return ESP_ERR_NO_MEM;
+            if (fread(ctx->dst_fbuf, 1, (size_t)sz, ctx->f) != (size_t)sz) return ESP_ERR_NOT_FOUND;
+            if (sz & 1) fseek(ctx->f, 1, SEEK_CUR);
+            size_t fb_total = (size_t)(ctx->dsd_rate / 75 / 8) * ctx->channels;
+            esp_err_t e = dst_decode_frame(ctx->dst_dec, ctx->dst_fbuf, (size_t)sz, ctx->dst_out);
+            if (e != ESP_OK) {
+                ESP_LOGW(TAG, "DST фрейм: ошибка 0x%x — повтор предыдущего", e);
+                memcpy(ctx->dst_out, ctx->dst_prev, fb_total);
+            } else {
+                memcpy(ctx->dst_prev, ctx->dst_out, fb_total);
+            }
+            ctx->dst_out_pos = 0;
+            ctx->dst_out_len = fb_total;
+            ctx->dst_frame_idx++;
+            if (ctx->dst_dsd_left_per_ch >= fb_total / ctx->channels) {
+                ctx->dst_dsd_left_per_ch -= fb_total / ctx->channels;
+            } else {
+                ctx->dst_dsd_left_per_ch = 0;
+            }
+            return ESP_OK;
+        }
+        if (sz > (1ULL << 40)) return ESP_ERR_NOT_SUPPORTED;
+        if (fseek(ctx->f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) return ESP_ERR_NOT_FOUND;
+    }
+}
+
+static bool dsd_next_interleaved(dsd_ctx_t *h, uint8_t *bl, uint8_t *br)
+{
+    if (h->fmt == DSD_FMT_DSF) {
+        if (h->super_pos >= h->super_valid) {
+            if (dsf_read_super(h) == 0) return false;
+        }
+        uint8_t blv = h->super[h->super_pos];
+        uint8_t brv = (h->channels >= 2) ? h->super[h->block_size + h->super_pos] : blv;
+        *bl = h->msb_first ? blv : h->rev8[blv];
+        *br = h->msb_first ? brv : h->rev8[brv];
+        h->super_pos++;
+        return true;
+    }
+    if (h->is_dst) {
+        if (h->dst_out_pos >= h->dst_out_len) {
+            if (dsd_dst_next_frame(h) != ESP_OK) return false;
+        }
+        *bl = h->dst_out[h->dst_out_pos];
+        *br = (h->channels >= 2) ? h->dst_out[h->dst_out_pos + 1] : *bl;
+        h->dst_out_pos += h->channels;
+        return true;
+    }
+    if (h->stream_pos >= h->stream_len) {
+        if (h->stream_left == 0) return false;
+        size_t want = DSD_CHUNK_DFF;
+        if (h->stream_left < want) want = (size_t)h->stream_left;
+        size_t got = fread(h->stream_buf, 1, want, h->f);
+        if (got == 0) return false;
+        h->stream_len = got;
+        h->stream_pos = 0;
+        h->stream_left -= got;
+    }
+    *bl = h->stream_buf[h->stream_pos];
+    *br = (h->channels >= 2) ? h->stream_buf[h->stream_pos + 1] : *bl;
+    h->stream_pos += h->channels;
+    return true;
 }
 
 /* --------------------------- Открытие -------------------------------------- */
@@ -290,9 +458,22 @@ esp_err_t dsd_open(const char *path, dsd_info_t *out, dsd_handle_t *h)
     out->samples_per_ch = ctx->samples_per_ch;
     out->seconds = (uint32_t)(ctx->samples_per_ch / (ctx->dsd_rate ? ctx->dsd_rate : 1));
 
-    ESP_LOGI(TAG, "%s: DSD %lu Гц, %d кан., ~%lu с -> DoP %lu Гц",
+    if (ctx->is_dst) {
+        ctx->dst_dec = dst_open(ctx->dsd_rate, ctx->channels);
+        if (ctx->dst_dec == NULL) {
+            ESP_LOGE(TAG, "DST: декодер не создан (rate %lu, ch %u)",
+                     (unsigned long)ctx->dsd_rate, ctx->channels);
+            goto fail;
+        }
+    }
+
+    ESP_LOGI(TAG, "%s: DSD %lu Гц, %d кан., ~%lu с%s",
              out->fmt_name, (unsigned long)ctx->dsd_rate, ctx->channels,
-             (unsigned long)out->seconds, (unsigned long)out->dop_fs);
+             (unsigned long)out->seconds,
+             ctx->is_dst ? ", DST-сжатие (75 фрейм/с)" : "");
+    if (!ctx->is_dst) {
+        ESP_LOGI(TAG, " -> DoP %lu Гц", (unsigned long)out->dop_fs);
+    }
     *h = ctx;
     return ESP_OK;
 
@@ -308,6 +489,10 @@ void dsd_close(dsd_handle_t h)
 {
     if (h == NULL) return;
     if (h->f) fclose(h->f);
+    if (h->dst_dec) dst_close(h->dst_dec);
+    free(h->dst_fbuf);
+    free(h->dst_out);
+    free(h->dst_prev);
     free(h->super);
     free(h->stream_buf);
     free(h);
@@ -326,38 +511,7 @@ size_t dsd_read_dop(dsd_handle_t h, int32_t *out, size_t max_samples, bool *eof)
 
     while (produced < max_frames) {
         uint8_t dl, dr;
-        bool data_ok = false;
-
-        if (h->fmt == DSD_FMT_DSF) {
-            if (h->super_pos >= h->super_valid) {
-                if (dsf_read_super(h) == 0) break;      /* EOF */
-            }
-            uint8_t bl = h->super[h->super_pos];
-            uint8_t br = (h->channels >= 2) ? h->super[h->block_size + h->super_pos] : bl;
-            dl = h->msb_first ? bl : h->rev8[bl];
-            dr = h->msb_first ? br : h->rev8[br];
-            h->super_pos++;
-            data_ok = true;
-        } else { /* DFF: потоковый интерливинг */
-            if (h->stream_pos >= h->stream_len) {
-                if (h->stream_left == 0) break;         /* EOF */
-                size_t want = DSD_CHUNK_DFF;
-                if (h->stream_left < want) want = (size_t)h->stream_left;
-                size_t got = fread(h->stream_buf, 1, want, h->f);
-                if (got == 0) break;
-                h->stream_len = got;
-                h->stream_pos = 0;
-                h->stream_left -= got;
-            }
-            uint8_t bl = h->stream_buf[h->stream_pos];
-            uint8_t br = (h->channels >= 2) ? h->stream_buf[h->stream_pos + 1] : bl;
-            h->stream_pos += h->channels;
-            dl = bl; dr = br;    /* DFF уже MSB-first */
-            data_ok = true;
-        }
-
-        if (!data_ok) break;
-
+        if (!dsd_next_interleaved(h, &dl, &dr)) break;
         uint8_t marker = ((h->frame_cnt / 256) & 1) ? 0xFA : 0x05;
         h->frame_cnt++;
         out[produced * 2]     = ((int32_t)marker << 24) | ((int32_t)dl << 16);
@@ -367,6 +521,37 @@ size_t dsd_read_dop(dsd_handle_t h, int32_t *out, size_t max_samples, bool *eof)
 
     if (eof) *eof = (produced < max_frames);   /* досрочно — значит данные кончились */
     return produced * 2;
+}
+
+/* Режим DSD (DoP / Native) */
+static dsd_play_mode_t s_dsd_mode = DSD_MODE_DOP;
+
+void dsd_play_mode_set(dsd_play_mode_t m)
+{
+    s_dsd_mode = m;
+}
+
+dsd_play_mode_t dsd_play_mode_get(void)
+{
+    return s_dsd_mode;
+}
+
+/* Сырой DSD-поток (интерлив L,R, MSB-first) — для native DSD (без DoP-маркеров). */
+size_t dsd_read_raw(dsd_handle_t h, uint8_t *out, size_t max_bytes, bool *eof)
+{
+    if (h == NULL || out == NULL || max_bytes < 2) {
+        if (eof) *eof = true;
+        return 0;
+    }
+    size_t produced = 0;
+    while (produced + 2 <= max_bytes) {
+        uint8_t bl, br;
+        if (!dsd_next_interleaved(h, &bl, &br)) break;
+        out[produced++] = bl;
+        out[produced++] = br;
+    }
+    if (eof) *eof = (produced < max_bytes);
+    return produced;
 }
 
 /* --------------------------- Помощник -------------------------------------- */
@@ -385,8 +570,9 @@ void dsd_get_progress(dsd_handle_t h, uint64_t *pos, uint64_t *total)
     if (total) *total = 0;
     if (h == NULL) return;
     uint64_t t = h->bytes_total_per_ch;
-    uint64_t left = (h->fmt == DSD_FMT_DSF) ? h->bytes_left_per_ch
-                                            : (h->stream_left / h->channels);
+    uint64_t left = h->dst_dsd_left_per_ch;
+    if (h->fmt == DSD_FMT_DSF) left = h->bytes_left_per_ch;
+    else if (!h->is_dst) left = h->stream_left / h->channels;
     if (t < left) left = t;   /* защита от кривых заголовков */
     if (pos)   *pos = t - left;
     if (total) *total = t;
@@ -407,10 +593,37 @@ esp_err_t dsd_seek_ms(dsd_handle_t h, uint32_t ms)
     if (h == NULL || h->f == NULL) return ESP_ERR_INVALID_STATE;
     if (h->bytes_total_per_ch == 0) return ESP_ERR_NOT_SUPPORTED;
 
-    uint64_t bytes_per_sec = (uint64_t)h->dsd_rate / 8;   /* 1 байт на канал = 8 DSD-сэмплов */
+    uint64_t bytes_per_sec = (uint64_t)h->dsd_rate / 8;
     uint64_t want = (bytes_per_sec * (uint64_t)ms) / 1000;
     if (want >= h->bytes_total_per_ch) {
         want = (h->bytes_total_per_ch > 0) ? h->bytes_total_per_ch - 1 : 0;
+    }
+
+    if (h->is_dst) {
+        uint64_t target = (uint64_t)ms * 75 / 1000;
+        if (target >= h->dst_num_frames) target = h->dst_num_frames - 1;
+        if (fseek(h->f, (long)h->dst_start_off, SEEK_SET) != 0) return ESP_FAIL;
+        uint64_t skip = target;
+        while (skip > 0) {
+            uint8_t h12[12];
+            if (fread(h12, 1, 12, h->f) != 12) return ESP_FAIL;
+            uint64_t sz = be64(h12 + 4);
+            if (memcmp(h12, "DSTF", 4) == 0) {
+                skip--;
+                if (fseek(h->f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) return ESP_FAIL;
+            } else {
+                if (sz > (1ULL << 40)) return ESP_ERR_NOT_SUPPORTED;
+                if (fseek(h->f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) return ESP_FAIL;
+            }
+        }
+        h->dst_frame_idx = target;
+        h->dst_dsd_left_per_ch = h->bytes_total_per_ch - (uint64_t)target * (h->dsd_rate / 75 / 8);
+        h->dst_out_pos = h->dst_out_len = 0;
+        h->frame_cnt = 0;
+        ESP_LOGI(TAG, "DST seek: %lu мс -> фрейм %llu из %llu",
+                 (unsigned long)ms, (unsigned long long)target,
+                 (unsigned long long)h->dst_num_frames);
+        return ESP_OK;
     }
 
     uint64_t file_off;

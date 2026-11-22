@@ -36,6 +36,8 @@ idf_component_register(
         "usb_msc.c"
         "phono_adc.c"
         "phono_dsp_test.c"    # DSP-самотест (вызывается вручную)
+        "dst_dec.c"
+        "dsd_native.c"   
         "web_ctrl.c"          # веб-пульт: HTTP-сервер порт 80
         "ota_upd.c"           # OTA-обновление прошивки (SD/URL)
         "usb_flash.c"         # флешка на OTG FS (GPIO24/25) как источник

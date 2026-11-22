@@ -47,7 +47,11 @@
 #include "sd_card.h"
 #include "usb_flash.h"
 #include "phono_adc.h"
+#include "dsd_dec.h"
+#include "dsd_native.h"
 #include "ota_upd.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "web_ctrl";
 
@@ -200,7 +204,7 @@ static void status_json(char *b, size_t cap)
     snprintf(b, cap,
         "{\"state\":\"%s\",\"kind\":\"%s\",\"src\":\"%s\","
         "\"vol_db\":%.1f,\"vol_pct\":%d,\"mute\":%s,"
-        "\"filter\":%d,\"fir\":%d,\"hpf\":%d,\"fs\":%lu,"
+        "\"filter\":%d,\"fir\":%d,\"hpf\":%d,\"dsd\":%d,\"fs\":%lu,"
         "\"pos_ms\":%lu,\"total_ms\":%lu,\"seekable\":%s,"
         "\"pl_count\":%d,\"pl_index\":%d,\"stations\":%d,"
         "\"ssid\":\"%s\",\"ip\":\"%s\",\"uptime_s\":%llu,"
@@ -211,6 +215,7 @@ static void status_json(char *b, size_t cap)
         s_hooks.get_filter ? s_hooks.get_filter() : -1,
         s_hooks.get_fir ? s_hooks.get_fir() : -1,
         (int)phono_hpf_get(),
+        (int)dsd_play_mode_get(),
         (unsigned long)i2s_out_current_fs(),
         (unsigned long)pos_ms, (unsigned long)total_ms, seekable ? "true" : "false",
         playlist_count(), playlist_index(), stations_count(),
@@ -344,6 +349,33 @@ static esp_err_t api_hpf(httpd_req_t *req)
     phono_hpf_set((hpf_mode_t)v);
     char buf[40];
     snprintf(buf, sizeof(buf), "{\"hpf\":%d}", v);
+    send_json(req, buf, 200);
+    return ESP_OK;
+}
+
+/* ------------------------- Режим DSD: DoP / Native ------------------------ */
+
+static esp_err_t api_dsd(httpd_req_t *req)
+{
+    char val[16];
+    if (get_query(req, "v", val, sizeof(val)) <= 0) {
+        send_json(req, "{\"dsd\":%d}", (int)dsd_play_mode_get());
+        return ESP_OK;
+    }
+    int v = atoi(val);
+    if (v < 0 || v > 1) {
+        send_json(req, "{\"err\":\"range 0..1\"}", 400);
+        return ESP_OK;
+    }
+    dsd_play_mode_set((dsd_play_mode_t)v);
+    nvs_handle_t nh;
+    if (nvs_open("dac", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_set_u8(nh, "dsd_mode", (uint8_t)v);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "{\"dsd\":%d}", v);
     send_json(req, buf, 200);
     return ESP_OK;
 }
@@ -668,6 +700,10 @@ static const char PAGE_HTML[] =
 "<button id='hp0' onclick=\"api('/api/hpf?v=0').then(tick)\">OFF</button>"
 "<button id='hp1' onclick=\"api('/api/hpf?v=1').then(tick)\">GENTLE</button>"
 "<button id='hp2' onclick=\"api('/api/hpf?v=2').then(tick)\">STRICT</button></div>"
+"<div class='lbl'>DSD mode</div>"
+"<div class='row'>"
+"<button id='dsd0' onclick=\"api('/api/dsd?v=0').then(tick)\">DoP</button>"
+"<button id='dsd1' onclick=\"api('/api/dsd?v=1').then(tick)\">Native</button></div>"
 "<div class='lbl'>Radio stations</div><ul id='stl'></ul>"
 "<div class='lbl'>Firmware</div>"
 "<div class='row'>"
@@ -705,7 +741,10 @@ static const char PAGE_HTML[] =
 "const hpf=(typeof j.hpf==='number')?j.hpf:1;"
 "$('hp0').style.background=hpf==0?'#4a7ba6':'#3a4148';"
 "$('hp1').style.background=hpf==1?'#4a7ba6':'#3a4148';"
-"$('hp2').style.background=hpf==2?'#4a7ba6':'#3a4148';}"
+"$('hp2').style.background=hpf==2?'#4a7ba6':'#3a4148';"
+"const dsdm=(typeof j.dsd==='number')?j.dsd:0;"
+"$('dsd0').style.background=dsdm==0?'#4a7ba6':'#3a4148';"
+"$('dsd1').style.background=dsdm==1?'#4a7ba6':'#3a4148';}"
 "})}"
 "setInterval(tick,2000);tick();"
 "let curRoot='sd';"
@@ -804,6 +843,7 @@ esp_err_t web_ctrl_start(const ui_hooks_t *hooks)
         { .uri = "/api/seek",     .method = HTTP_POST,    .handler = api_seek      },
         { .uri = "/api/phono",    .method = HTTP_POST,    .handler = api_phono     },
         { .uri = "/api/hpf",      .method = HTTP_POST,    .handler = api_hpf       },
+        { .uri = "/api/dsd",      .method = HTTP_POST,    .handler = api_dsd       },
         { .uri = "/api/src",      .method = HTTP_POST,    .handler = api_src       },
         { .uri = "/api/files",    .method = HTTP_GET,     .handler = api_files     },
         { .uri = "/api/playfile", .method = HTTP_POST,    .handler = api_playfile  },

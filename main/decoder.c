@@ -47,6 +47,7 @@
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 #include "dsd_dec.h"
+#include "dsd_native.h"
 #include "phono_adc.h"
 #include "meta.h"
 #include "es9039q2m_esp32p4_driver.h"
@@ -283,6 +284,36 @@ static void dsd_playback_loop(void)
             meta_reset();
             meta_parse_id3_buffer(id3buf, got);
         }
+    }
+
+    bool native = (dsd_play_mode_get() == DSD_MODE_NATIVE);
+
+    if (native) {
+        esp_err_t nerr = dsd_native_start(info.dsd_rate);
+        if (nerr != ESP_OK) {
+            ESP_LOGW(TAG, "Native DSD недоступен (%s) — откат на DoP",
+                     esp_err_to_name(nerr));
+            dsd_play_mode_set(DSD_MODE_DOP);
+            native = false;
+        }
+    }
+
+    if (native) {
+        ESP_LOGI(TAG, "DSD: %s, %lu Гц (%d кан.) -> Native DSD (DSD%lu)",
+                 info.fmt_name, (unsigned long)info.dsd_rate, info.channels,
+                 (unsigned long)(info.dsd_rate / 2822400));
+        while (!s_dec.stop_requested) {
+            bool eof = false;
+            size_t n = dsd_read_raw(dsd, s_dec.out_buf, s_dec.out_buf_size, &eof);
+            if (n == 0) break;
+            if (dsd_native_write((const uint8_t *)s_dec.out_buf, n) != ESP_OK) break;
+            if (eof) break;
+        }
+        dsd_close(dsd);
+        s_dec.dsd = NULL;
+        dsd_native_stop();
+        ESP_LOGI(TAG, "Native DSD завершён, DAC вернулся в PCM");
+        return;
     }
 
     /* вход DAC -> DoP: mute, смена Reg 1/57, ожидание lock, unmute.
@@ -730,7 +761,7 @@ esp_err_t decoder_seek(uint32_t ms)
         return ESP_ERR_NOT_SUPPORTED;
     }
     decoder_type_t eff = detect_type(s_dec.url, s_dec.type_override);
-    if (eff != ESP_AUDIO_SIMPLE_DEC_TYPE_MP3) {
+    if ((int)eff != (int)ESP_AUDIO_SIMPLE_DEC_TYPE_MP3) {
         /* FLAC/WAV: рестарт с середины требует заголовок — пока не поддержано
          * (TODO: проверить mid-stream sync на железе; для FLAC добавить seektable). */
         ESP_LOGW(TAG, "перемотка для %s пока не поддерживается",
@@ -756,7 +787,6 @@ esp_err_t decoder_seek(uint32_t ms)
     if (ftotal > 0 && offset >= ftotal) {
         offset = (ftotal > 1024) ? ftotal - 1024 : 0;
     }
-    if (offset < 0) offset = 0;
 
     bool was_paused = s_dec.paused;
     char url[512];
