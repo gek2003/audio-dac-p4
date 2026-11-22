@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -79,14 +80,73 @@ static int cmp_paths(const void *a, const void *b)
     return strcmp(pa, pb);
 }
 
+/* ---- кэш скана папки (P3-16) ------------------------------ */
+/* Пути последнего удачного скана одним буфером через '\0'.
+ * Повторный вход в ту же папку (совпадение пути + свежий mtime)
+ * собирается из кэша без readdir/stat/qsort. Лимит буфера 64 КБ. */
+#define CACHE_MAX 65536
+
+static char     *s_cache_buf = NULL;
+static int       s_cache_count = 0;
+static char      s_cache_dir[PLAYLIST_PATH_MAX];
+static time_t    s_cache_mtime = 0;
+static bool      s_cache_valid = false;
+
+static void cache_clear(void)
+{
+    if (s_cache_buf) { free(s_cache_buf); s_cache_buf = NULL; }
+    s_cache_count = 0;
+    s_cache_mtime = 0;
+    s_cache_valid = false;
+}
+
+void playlist_cache_invalidate(void)
+{
+    cache_clear();
+}
+
+/* Общий выбор стартового трека для кэш-пути и свежего скана */
+static void select_start(const char *start_file)
+{
+    s_pl.index = 0;
+    if (start_file != NULL && start_file[0] != '\0') {
+        for (int i = 0; i < s_pl.count; i++) {
+            const char *base = strrchr(s_pl.items[i], '/');
+            if (base && strcasecmp(base + 1, start_file) == 0) {
+                s_pl.index = i;
+                break;
+            }
+        }
+    }
+}
+
 esp_err_t playlist_load_dir(const char *dir_path, const char *start_file)
 {
     if (dir_path == NULL || dir_path[0] == '\0') return ESP_ERR_INVALID_ARG;
     reset();
 
+    struct stat dst;
+    bool have_dst = (stat(dir_path, &dst) == 0);
+
+    /* Кэш: та же папка, mtime не менялся — без readdir/stat/qsort */
+    if (have_dst && s_cache_valid &&
+        strcmp(dir_path, s_cache_dir) == 0 && dst.st_mtime == s_cache_mtime) {
+        const char *cp = s_cache_buf;
+        for (int i = 0; i < s_cache_count; i++, cp += strlen(cp) + 1) add_track(cp);
+        if (s_pl.count == s_cache_count) {
+            snprintf(s_pl.base_dir, sizeof(s_pl.base_dir), "%s", dir_path);
+            select_start(start_file);
+            ESP_LOGI(TAG, "Плейлист папки (из кэша): %d трек(ов), старт №%d",
+                     s_pl.count, s_pl.index + 1);
+            return ESP_OK;
+        }
+        reset();                       /* кэш рассыпался (OOM) — обычный скан */
+    }
+
     DIR *d = opendir(dir_path);
     if (d == NULL) {
         ESP_LOGW(TAG, "Папка не открылась: %s", dir_path);
+        cache_clear();
         return ESP_ERR_NOT_FOUND;
     }
     struct dirent *ent;
@@ -103,21 +163,36 @@ esp_err_t playlist_load_dir(const char *dir_path, const char *start_file)
 
     if (s_pl.count == 0) {
         ESP_LOGW(TAG, "В папке нет аудиофайлов: %s", dir_path);
+        cache_clear();
         return ESP_ERR_NOT_FOUND;
     }
     qsort(s_pl.items, s_pl.count, sizeof(char *), cmp_paths);
     snprintf(s_pl.base_dir, sizeof(s_pl.base_dir), "%s", dir_path);
 
-    s_pl.index = 0;
-    if (start_file != NULL && start_file[0] != '\0') {
-        for (int i = 0; i < s_pl.count; i++) {
-            const char *base = strrchr(s_pl.items[i], '/');
-            if (base && strcasecmp(base + 1, start_file) == 0) {
-                s_pl.index = i;
-                break;
+    /* Сохранить кэш скана (если весь список влезает в лимит) */
+    {
+        size_t total = 0;
+        for (int i = 0; i < s_pl.count; i++) total += strlen(s_pl.items[i]) + 1;
+        cache_clear();
+        if (have_dst && total <= CACHE_MAX) {
+            s_cache_buf = heap_caps_malloc(total, MALLOC_CAP_SPIRAM);
+            if (s_cache_buf == NULL) s_cache_buf = malloc(total);
+            if (s_cache_buf != NULL) {
+                char *w = s_cache_buf;
+                for (int i = 0; i < s_pl.count; i++) {
+                    size_t l = strlen(s_pl.items[i]) + 1;
+                    memcpy(w, s_pl.items[i], l);
+                    w += l;
+                }
+                s_cache_count = s_pl.count;
+                snprintf(s_cache_dir, sizeof(s_cache_dir), "%s", dir_path);
+                s_cache_mtime = dst.st_mtime;
+                s_cache_valid = true;
             }
         }
     }
+
+    select_start(start_file);
     ESP_LOGI(TAG, "Плейлист папки: %d трек(ов), старт №%d", s_pl.count, s_pl.index + 1);
     return ESP_OK;
 }
@@ -126,6 +201,7 @@ esp_err_t playlist_load_m3u(const char *m3u_path)
 {
     if (m3u_path == NULL || m3u_path[0] == '\0') return ESP_ERR_INVALID_ARG;
     reset();
+    cache_clear();
 
     FILE *f = fopen(m3u_path, "r");
     if (f == NULL) {

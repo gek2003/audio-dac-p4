@@ -83,6 +83,15 @@ bool      decoder_paused(void);
 void      decoder_set_on_finish(void (*cb)(void));  /* конец файла (авто-переход) */
 void      decoder_progress(uint64_t *pos, uint64_t *total);
 
+/* Асинхронное переключение источника (P2): не ждёт выхода задачи декодера,
+ * не блокирует httpd/UI. Последний запрос выигрывает. */
+esp_err_t decoder_request(const char *url, decoder_type_t type, bool is_stream_hint);
+
+/* Громкость/mute пользователя (реализация в main.c): fade декодера (P4b)
+ * восстанавливает регистр громкости к этому значению и не сносит ручной mute. */
+float     audio_user_volume_db(void);
+bool      audio_user_muted(void);
+
 /* Точный прогресс: позиция и длительность в мс (+ флаг «можно ли перематывать»).
  * Позиция — по декодированным сэмплам (не по позиции чтения файла). */
 void      decoder_progress_ext(uint32_t *pos_ms, uint32_t *total_ms, bool *seekable);
@@ -98,3 +107,5 @@ esp_err_t i2s_out_apply_fs(uint32_t fs);
 esp_err_t i2s_out_write(const void *pcm, size_t bytes);
 esp_err_t i2s_out_deinit(void);
 uint32_t  i2s_out_current_fs(void);
+void      i2s_out_set_paused(bool paused);
+bool      i2s_out_paused(void);

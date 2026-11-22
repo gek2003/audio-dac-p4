@@ -60,7 +60,7 @@
 extern esp_err_t es9039_switch_frequency(void (*apply_cb)(void *), void *arg,
                                           uint32_t lock_timeout_ms, uint32_t fs_hz);
 
-/* Прототипы из i2s_out.c включены в audio_pipeline.h */
+/* Прототипы i2s_out — в i2s_out.h (P4b: паузу использует и dec_req) */
 
 static const char *TAG = "decoder";
 
@@ -71,13 +71,7 @@ static const char *TAG = "decoder";
 #define DEC_TASK_PRIO        11
 #define DEC_STOP_DRAIN_MS    2000
 
-/* Прототипы из i2s_out.c */
-extern esp_err_t i2s_out_init(void);
-extern esp_err_t i2s_out_apply_fs(uint32_t fs);
-extern esp_err_t i2s_out_write(const void *pcm, size_t bytes);
-extern uint32_t  i2s_out_current_fs(void);
-extern void      i2s_out_set_paused(bool paused);
-extern bool      i2s_out_paused(void);
+#include "i2s_out.h"
 
 typedef struct {
     char                       url[512];
@@ -230,6 +224,86 @@ static size_t convert_to_32bit(const uint8_t *src, size_t src_len, uint8_t bits,
     return out_used;
 }
 
+/* ---------------- Мягкая пауза файлов: fade громкостью ЦАПа (P4b/P4-20) ---
+ * Затухание и разгон делает задача декодера на переходе паузы — httpd/UI не
+ * блокируются. Пол -120 дБ, 20 шагов по 10 мс (около 200 мс). В нижней точке
+ * DAC мьютится (гасит клик на стыке и DC-протечку), регистр громкости сразу
+ * возвращается к пользовательскому — тишину держит mute. Ручной mute
+ * пользователя fade не сносит (audio_user_muted()). */
+#define DSD_FADE_STEPS    20
+#define DSD_FADE_STEP_MS  10
+#define DSD_FADE_FLOOR_DB (-120.0f)
+
+static float s_fade_level_db = 0.0f;  /* текущее затухание регистра, дБ (0 = нет) */
+static bool  s_fade_muted    = false; /* mute наложен fade-механикой, не пользователем */
+
+/* Страховка: снять наш mute и восстановить громкость пользователя. */
+static void dsd_fade_restore(void)
+{
+    if (s_fade_muted) {
+        if (!audio_user_muted()) {
+            (void)es9039_mute(false);
+        }
+        s_fade_muted = false;
+    }
+    if (s_fade_level_db != 0.0f) {
+        (void)es9039_set_volume_db(audio_user_volume_db());
+        s_fade_level_db = 0.0f;
+    }
+}
+
+/* Затухание: true — дошли до mute; false — отменено (стоп/снятая пауза). */
+static bool dsd_fade_down(void)
+{
+    float user_db = audio_user_volume_db();
+    float from = (s_fade_level_db != 0.0f) ? s_fade_level_db : user_db;
+    if (from > user_db) from = user_db;   /* повторная пауза посреди разгона */
+    for (int step = 1; step <= DSD_FADE_STEPS; step++) {
+        if (s_dec.stop_requested || !s_dec.paused) {
+            dsd_fade_restore();           /* отмена: громкость не «застревает» */
+            return false;
+        }
+        float db = from + (DSD_FADE_FLOOR_DB - from) * step / DSD_FADE_STEPS;
+        (void)es9039_set_volume_db(db);
+        s_fade_level_db = db;
+        vTaskDelay(pdMS_TO_TICKS(DSD_FADE_STEP_MS));
+    }
+    (void)es9039_mute(true);              /* нижняя точка: гасим клик и DC */
+    s_fade_muted = true;
+    (void)es9039_set_volume_db(user_db);  /* регистр сразу к пользовательскому */
+    s_fade_level_db = 0.0f;
+    return true;
+}
+
+/* Разгон: пол -> (наш) unmute -> наполнение DMA -> громкость пользователя. */
+static void dsd_fade_up(void)
+{
+    float user_db = audio_user_volume_db();
+    if (s_fade_muted) {
+        (void)es9039_set_volume_db(DSD_FADE_FLOOR_DB);
+        s_fade_level_db = DSD_FADE_FLOOR_DB;
+        if (!audio_user_muted()) {
+            (void)es9039_mute(false);
+        }
+        s_fade_muted = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(80));        /* наполнение DMA до подачи звука */
+    float from = (s_fade_level_db != 0.0f) ? s_fade_level_db : DSD_FADE_FLOOR_DB;
+    if (from > user_db) from = user_db;
+    for (int step = 1; step <= DSD_FADE_STEPS; step++) {
+        if (s_dec.stop_requested) {
+            dsd_fade_restore();
+            return;
+        }
+        float db = from + (user_db - from) * step / DSD_FADE_STEPS;
+        (void)es9039_set_volume_db(db);
+        s_fade_level_db = db;
+        vTaskDelay(pdMS_TO_TICKS(DSD_FADE_STEP_MS));
+    }
+    (void)es9039_set_volume_db(user_db);
+    s_fade_level_db = 0.0f;
+}
+
 /* ------------------- ADC passthrough (adc://) ------------------------------
  * Живой вход: phono_adc.c пишет в ringbuf готовые 32-битные стерео-фреймы
  * (24 бита в старших разрядах, 192 кГц), decoder льёт их без изменений в
@@ -240,7 +314,14 @@ static void adc_playback_loop(void)
 {
     apply_rate_with_dac(192000);   /* BCLK/LRCK 192к на DAC (mute->unmute внутри) */
 
+    bool adc_paused = false;
     while (!s_dec.stop_requested) {
+        /* Пауза фоно: мгновенная, без fade (живой вход). При паузе буфер
+         * дренируем с возвратом item — задача phono_adc не блокируется. */
+        if (s_dec.paused != adc_paused) {
+            i2s_out_set_paused(s_dec.paused);
+            adc_paused = s_dec.paused;
+        }
         size_t chunk = 0;
         uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(s_dec.ring, &chunk,
                                                           pdMS_TO_TICKS(500),
@@ -250,6 +331,10 @@ static void adc_playback_loop(void)
                 ESP_LOGW(TAG, "ADC-источник остановился");
                 break;
             }
+            continue;
+        }
+        if (s_dec.paused) {
+            vRingbufferReturnItem(s_dec.ring, (void *)data);
             continue;
         }
         if (chunk > 0) {
@@ -339,7 +424,23 @@ static void dsd_playback_loop(void)
              info.fmt_name, (unsigned long)info.dsd_rate, info.channels,
              (unsigned long)info.dop_fs);
 
+    bool dop_paused = false;
     while (!s_dec.stop_requested) {
+        if (s_dec.paused != dop_paused) {
+            if (s_dec.paused) {
+                dsd_fade_down();            /* затухание громкостью ЦАПа */
+                i2s_out_set_paused(true);
+                dop_paused = true;
+            } else {
+                i2s_out_set_paused(false);  /* пуск подачи */
+                dsd_fade_up();              /* наполнение DMA + разгон */
+                dop_paused = false;
+            }
+        }
+        if (s_dec.paused) {
+            vTaskDelay(pdMS_TO_TICKS(20));  /* файл не читаем — позиция не растёт */
+            continue;
+        }
         bool eof = false;
         size_t n = dsd_read_dop(dsd, (int32_t *)s_dec.out_buf,
                                 s_dec.out_buf_size / 4, &eof);
@@ -347,6 +448,7 @@ static void dsd_playback_loop(void)
         i2s_out_write(s_dec.out_buf, n * sizeof(int32_t));
         if (eof) break;
     }
+    dsd_fade_restore();   /* страховка: вышли в паузе — вернуть DAC в строй */
     dsd_close(dsd);
     s_dec.dsd = NULL;
 
@@ -409,8 +511,27 @@ static void decoder_task(void *arg)
 
     bool info_known = false;
     bool input_ended = false;
+    bool is_stream = http_source_is_stream();   /* радио: mute из decoder_pause */
+    bool pcm_paused = false;
 
     while (!s_dec.stop_requested) {
+        /* Переход паузы: файлы — fade (как в DoP); радио не трогаем —
+         * mute/паузу DMA делает decoder_pause/resume. */
+        if (!is_stream && s_dec.paused != pcm_paused) {
+            if (s_dec.paused) {
+                dsd_fade_down();
+                i2s_out_set_paused(true);
+                pcm_paused = true;
+            } else {
+                i2s_out_set_paused(false);
+                dsd_fade_up();
+                pcm_paused = false;
+            }
+        }
+        if (!is_stream && s_dec.paused) {
+            vTaskDelay(pdMS_TO_TICKS(20));  /* ringbuf не читаем — источник затормозит */
+            continue;
+        }
         if (s_dec.out_buf == NULL) {
             s_dec.out_buf_size = DEC_OUT_BUF_MIN;
             s_dec.out_buf = heap_caps_malloc(s_dec.out_buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -516,6 +637,10 @@ static void decoder_task(void *arg)
         vRingbufferReturnItem(s_dec.ring, (void *)data);
     }
 
+    if (!is_stream) {
+        dsd_fade_restore();   /* страховка: вышли в паузе — вернуть DAC в строй */
+    }
+
 cleanup:
     if (s_dec.dec != NULL) {
         esp_audio_simple_dec_close(s_dec.dec);
@@ -561,6 +686,7 @@ esp_err_t decoder_start(const char *url, decoder_type_t type, bool is_stream_hin
     s_dec.stop_requested = false;
     s_dec.current_fs = 0;
     i2s_out_set_paused(false);
+    dsd_fade_restore();   /* новый источник не должен начаться в mute/«вполсилы» */
 
     /* DSD-файлы (.dsf/.dff): источник не нужен — dsd_dec.c читает файл сам */
     bool is_dsd_file = (strncmp(url, "file://", 7) == 0) && dsd_is_dsd_path(url);
@@ -623,6 +749,7 @@ void decoder_stop(void)
         vTaskDelay(pdMS_TO_TICKS(100));
         waited += 100;
     }
+    dsd_fade_restore();   /* задача могла выйти в паузе/средние fade — вернём DAC */
 }
 
 bool decoder_running(void)
@@ -729,10 +856,14 @@ void decoder_pause(void)
         dsd_native_pause(true);
         return;
     }
-    i2s_out_set_paused(true);
     if (http_source_is_stream()) {
+        /* Радио: мгновенный mute — декодер продолжает качать буфер, при
+         * снятии паузы звук вернётся без рывка. */
+        i2s_out_set_paused(true);
         es9039_mute(true);
     }
+    /* Файлы (DoP/PCM) и ADC: только флаг — затухание и паузу DMA делает
+     * задача декодера (переход виден в её цикле). */
 }
 
 void decoder_resume(void)
@@ -743,10 +874,11 @@ void decoder_resume(void)
         dsd_native_pause(false);
         return;
     }
-    i2s_out_set_paused(false);
     if (http_source_is_stream()) {
+        i2s_out_set_paused(false);
         es9039_mute(false);
     }
+    /* Файлы (DoP/PCM) и ADC: пуск подачи и разгон делает задача декодера */
 }
 
 bool decoder_paused(void)

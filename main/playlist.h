@@ -40,3 +40,8 @@ bool     playlist_next(void);             /* advance; false = конец оче�
 bool     playlist_prev(void);             /* назад; false = уже в начале */
 void     playlist_clear(void);
 bool     playlist_active(void);           /* очередь не пуста */
+
+/* Сбросить кэш скана папок: вызывать, когда файлы на SD менялись по
+ * стороннему каналу (USB MSC, копирование с ПК) — следующий
+ * playlist_load_dir() пересканирует папку заново. */
+void     playlist_cache_invalidate(void);

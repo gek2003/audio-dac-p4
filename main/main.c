@@ -219,10 +219,7 @@ static void vol_apply(float db)
     (void)es9039_set_volume_db(db);
 }
 
-/* Асинхронное переключение источника: объявление стоит добавить в decoder.h
- * при следующей правке; здесь — extern, чтобы патч не включал decoder.h целиком. */
-extern esp_err_t decoder_request(const char *url, decoder_type_t type,
-                                 bool is_stream_hint);
+/* decoder_request объявлен в audio_pipeline.h (P4b: перенесён из extern) */
 
 /* --- Мьютекс хуков UI/web: хуки зовутся из LVGL-задачи и из httpd ----------
  * Гонка декодера (двойной start/переключение) закрыта мьютексом в decoder.c;
@@ -253,6 +250,29 @@ static void ui_h_set_volume(float db)
 static bool s_mute_state = false;
 
 static void ui_h_set_mute(bool on)         { if (hook_lock()) { s_mute_state = on; (void)es9039_mute(on); hook_unlock(); } }
+
+/* Громкость/mute пользователя для fade декодера (P4b/P4-20): чтение под
+ * мьютексом хуков; при занятом мьютексе — чтение без блокировки (гонка на
+ * float безвредна: vol_apply меняет значение одной записью). */
+float audio_user_volume_db(void)
+{
+    if (hook_lock()) {
+        float db = s_vol_db;
+        hook_unlock();
+        return db;
+    }
+    return s_vol_db;   /* фолбэк без блокировки */
+}
+
+bool audio_user_muted(void)
+{
+    if (hook_lock()) {
+        bool on = s_mute_state;
+        hook_unlock();
+        return on;
+    }
+    return s_mute_state;   /* фолбэк без блокировки */
+}
 static void ui_h_set_filter(int preset)
 {
     if (!hook_lock()) return;

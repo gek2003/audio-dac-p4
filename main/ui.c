@@ -131,6 +131,7 @@ static i2c_master_bus_handle_t s_i2c_bus;   /* общая шина: ЦАП + GT9
 
 /* элементы состояния */
 static lv_obj_t *s_vol_lbl;
+static lv_obj_t *s_vol_slider;    /* зеркало громкости (P2-12) */
 static lv_obj_t *s_mute_sw;
 static lv_obj_t *s_src_lbl;
 static lv_obj_t *s_diag_lbl;
@@ -1075,6 +1076,21 @@ static void prog_tick(lv_timer_t *t)
     cover_tick();
     bl_idle_check();
     standby_check();
+
+    /* P2-12: зеркало громкости — слайдер и подпись догоняют громкость,
+     * изменённую с телефона/веб-пульта. Вставлено до раннего выхода для
+     * радио (иначе слайдер не обновлялся бы, пока играет поток). Пока
+     * слайдер держат пальцем (LV_STATE_PRESSED) — не трогаем. */
+    if (s_vol_slider != NULL
+        && (lv_obj_get_state(s_vol_slider) & LV_STATE_PRESSED) == 0) {
+        float cur_db = s_hooks.get_volume_db ? s_hooks.get_volume_db() : -25.0f;
+        if (slider_to_db(lv_slider_get_value(s_vol_slider)) != cur_db) {
+            lv_slider_set_value(s_vol_slider, db_to_slider(cur_db), LV_ANIM_OFF);
+            if (s_vol_lbl != NULL) {
+                lv_label_set_text_fmt(s_vol_lbl, "%.1f dB", cur_db);
+            }
+        }
+    }
     if (!s_prog_bar || !s_prog_lbl) return;
 
     const char *src = s_hooks.get_source ? s_hooks.get_source() : "";
@@ -1238,6 +1254,7 @@ static void build_home(lv_obj_t *c)
     lv_slider_set_range(sl, 0, 255);
     lv_slider_set_value(sl, db_to_slider(db), LV_ANIM_OFF);
     lv_obj_add_event_cb(sl, on_vol_slider, LV_EVENT_VALUE_CHANGED, NULL);
+    s_vol_slider = sl;   /* P2-12: зеркало громкости в prog_tick */
 
     lv_obj_t *mt = lv_label_create(c);
     lv_obj_set_style_text_font(mt, f_norm(), 0);
