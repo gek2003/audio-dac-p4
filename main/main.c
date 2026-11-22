@@ -39,9 +39,10 @@
 #include "usb_msc.h"
 #include "playlist.h"
 #include "ui.h"
+#include "dsd_native.h"
+#include "ota_upd.h"
 #include "web_ctrl.h"
 #include "usb_flash.h"
-#include "dsd_native.h"
 #include "dsd_dec.h"
 
 static const char *TAG = "main";
@@ -583,8 +584,7 @@ void app_main(void)
                  esp_err_to_name(werr));
     }
 
-    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) ---
-     * Стартует всегда: без Wi-Fi слушает вхолостую, IP появится при подключении. */
+    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) --- */
     (void)web_ctrl_start(&s_ui_hooks);
 
     /* --- SD-карта: инициализация + USB MSC (карта как USB-диск ПК) --- */
@@ -602,11 +602,7 @@ void app_main(void)
         }
     }
 
-    /* --- Флешка на втором USB-порту (OTG FS, GPIO24/25) ---
-     * Хост-стек на периферии 1 (USB_DWC_FS); TinyUSB MSC (SD как диск ПК)
-     * живёт на HS — независимы. Хуки: извлечение глушит воспроизведение
-     * с /usb. Флешка появляется в /usb; играть — через веб-пульт
-     * (переключатель SD/USB) или /api/playfile?p=...&root=usb. */
+    /* --- Флешка на втором USB-порту (OTG FS) --- */
     usb_flash_set_hooks(&(usb_flash_hooks_t){
         .on_mounted   = usb_on_mounted,
         .on_unmounted = usb_on_unmounted,
@@ -661,6 +657,11 @@ void app_main(void)
         /* Не фаталим: аудио-тракт должен работать и без экрана */
         ESP_LOGW(TAG, "UI не поднялся: %s", esp_err_to_name(uerr));
     }
+
+    /* OTA rollback: если запустилась новая прошивка (pending verify) и всё
+     * поднялось до сюда — подтверждаем её; иначе после ребута загрузчик
+     * откатит на предыдущий образ (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE). */
+    ota_upd_confirm_app();
 
     /* При желании: сменить стартовый FIR-пресет до подключения источника:
      * es9039_set_filter(ES9039_FIR_LP_FAST);  // штатные пресеты Reg 88

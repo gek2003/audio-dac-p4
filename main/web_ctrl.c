@@ -47,9 +47,9 @@
 #include "sd_card.h"
 #include "usb_flash.h"
 #include "phono_adc.h"
-#include "dsd_dec.h"
 #include "dsd_native.h"
 #include "ota_upd.h"
+#include "dsd_dec.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 
@@ -150,7 +150,6 @@ static esp_err_t opts_handler(httpd_req_t *req)
 static const char *src_kind(const char *url)
 {
     if (url == NULL || url[0] == '\0' || strcmp(url, "-") == 0) return "none";
-    if (strncmp(url, "adc://", 6) == 0) return "adc";
     if (strncmp(url, "file://", 7) == 0) {
         const char *dot = strrchr(url, '.');
         if (dot && (strncasecmp(dot, ".dsf", 4) == 0 || strncasecmp(dot, ".dff", 4) == 0)) return "dsd";

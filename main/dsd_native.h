@@ -41,6 +41,11 @@ void      dsd_native_stop(void);
 
 bool      dsd_native_running(void);
 
+/* Пауза native: остановка клока (DATA_CLK) — ЦАП по fault-detect сам уходит
+ * в тишину. Позиция файла при этом не двигается (декодер не читает). */
+void      dsd_native_pause(bool p);
+bool      dsd_native_paused(void);
+
 /* Записать DSD-байты (интерлив L,R, MSB-first — как в DFF «DSD »-чанке).
  * bytes должен быть кратен 2 (пара байт L/R). Блокирует до полной записи
  * в оба порта. */

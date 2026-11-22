@@ -13,6 +13,7 @@
 
 #include "dsd_native.h"
 #include "es9039q2m_esp32p4_driver.h"
+#include "i2s_out.h"
 
 static const char *TAG = "dsd_nat";
 
@@ -29,6 +30,7 @@ static const char *TAG = "dsd_nat";
 static i2s_chan_handle_t s_tx1 = NULL;
 static i2s_chan_handle_t s_tx2 = NULL;
 static volatile bool     s_running = false;
+static volatile bool     s_paused = false;
 static uint32_t          s_rate = 0;
 
 /* Раскидка интерлива [L,R,L,R...] в [L,0,L,0...] и [R,0,R,0...]:
@@ -54,6 +56,11 @@ esp_err_t dsd_native_start(uint32_t dsd_rate)
         return ESP_ERR_INVALID_STATE;   /* уже играет */
     }
 
+    /* Штатный PCM-порт (i2s_out) молчит: его dout/WS — те же физические
+     * пины GPIO48/GPIO47, что и у native-портов. Два DMA на один GPIO —
+     * мусор в DATA1/WS. Пауза снимается в dsd_native_stop(). */
+    i2s_out_set_paused(true);
+
     /* Переключение входа ЦАПа: PCM -> native DSD (Reg1=0x82, Reg57 с AUTO) */
     esp_err_t err = es9039_set_input(ES9039_INPUT_DSD);
     if (err != ESP_OK) {
@@ -67,7 +74,7 @@ esp_err_t dsd_native_start(uint32_t dsd_rate)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 256;
-    err = i2s_new_channel(&chan_cfg, NULL, &s_tx1);
+    err = i2s_new_channel(&chan_cfg, &s_tx1, NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_new_channel(master): %s", esp_err_to_name(err));
         es9039_set_input(ES9039_INPUT_PCM);
@@ -95,7 +102,7 @@ esp_err_t dsd_native_start(uint32_t dsd_rate)
     i2s_chan_config_t chan_cfg2 = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_SLAVE);
     chan_cfg2.dma_desc_num = 8;
     chan_cfg2.dma_frame_num = 256;
-    err = i2s_new_channel(&chan_cfg2, NULL, &s_tx2);
+    err = i2s_new_channel(&chan_cfg2, &s_tx2, NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_new_channel(slave): %s", esp_err_to_name(err));
         goto fail;
@@ -131,6 +138,7 @@ fail:
     if (s_tx2 != NULL) { i2s_channel_disable(s_tx2); i2s_del_channel(s_tx2); s_tx2 = NULL; }
     es9039_set_input(ES9039_INPUT_PCM);
     es9039_mute(false);
+    i2s_out_set_paused(false);            /* откат: штатный PCM-порт снова жив */
     return err;
 }
 
@@ -141,13 +149,34 @@ void dsd_native_stop(void)
     if (s_tx2 != NULL) { i2s_channel_disable(s_tx2); i2s_del_channel(s_tx2); s_tx2 = NULL; }
     es9039_set_input(ES9039_INPUT_PCM);   /* вернуть PCM-вход */
     es9039_mute(false);
+    i2s_out_set_paused(false);            /* вернуть штатный PCM-порт */
     s_running = false;
+    s_paused = false;
     s_rate = 0;
     ESP_LOGI(TAG, "Native DSD остановлен");
 }
 
 bool dsd_native_running(void) { return s_running; }
+bool dsd_native_paused(void) { return s_paused; }
 uint32_t dsd_native_rate(void) { return s_rate; }
+
+/* Пауза native-DSD: останавливаем клок (DATA_CLK падает) — ES9039 по
+ * fault-detect (Reg57[6]) сам ставит DSD mute pattern 0x96. При снятии —
+ * клок возвращается, Reg1/57 переписываются (гарантированный вход). */
+void dsd_native_pause(bool p)
+{
+    if (!s_running) return;
+    if (p == s_paused) return;
+    if (p) {
+        if (s_tx1) i2s_channel_disable(s_tx1);
+        if (s_tx2) i2s_channel_disable(s_tx2);
+    } else {
+        if (s_tx1) i2s_channel_enable(s_tx1);
+        if (s_tx2) i2s_channel_enable(s_tx2);
+        es9039_set_input(ES9039_INPUT_DSD);
+    }
+    s_paused = p;
+}
 
 esp_err_t dsd_native_write(const uint8_t *inter, size_t bytes)
 {

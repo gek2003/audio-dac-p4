@@ -10,17 +10,12 @@
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 #include "esp_log.h"
-#include "esp_err.h"
 
 #include "dsd_dec.h"
 #include "dst_dec.h"
 
-typedef struct dsd_ctx_s dsd_ctx_t;   /* определение структуры ниже (до первого использования) */
-
-static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size);
 static const char *TAG = "dsd_dec";
 
 #define DSD_BLOCK_SIZE_DSF   4096   /* блок данных на канал в DSF */
@@ -56,7 +51,7 @@ struct dsd_ctx_s {
     uint8_t  rev8[256];            /* таблица bit-reverse (для LSB-first DSF) */
 
     /* DoP-состояние */
-    uint32_t frame_cnt;            /* стерео-фреймов с начала потока (для маркера) */
+    uint32_t frame_cnt;
 
     /* DST-сжатые DFF: под-чанки FRTE/DSTF/DSTC внутри чанка "DST " */
     bool      is_dst;
@@ -71,6 +66,11 @@ struct dsd_ctx_s {
     size_t    dst_out_pos, dst_out_len;
     uint8_t  *dst_prev;
 };
+
+typedef struct dsd_ctx_s dsd_ctx_t;
+
+static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size);
+
 
 /* --------------------------- DSF ------------------------------------------ */
 
@@ -211,13 +211,13 @@ static esp_err_t parse_dff(dsd_ctx_t *ctx)
             if (fread(b, 1, 4, ctx->f) != 4) break;
             ctx->dsd_rate = be32(b);
             rate_ok = true;
-            if (sz > 4 && fseek(ctx->f, (long)(sz - 4), SEEK_CUR) != 0) break;
+            if (sz > 4 && fseek(ctx->f, (long)((sz - 4) + (sz & 1)), SEEK_CUR) != 0) break;
         } else if (memcmp(ch, "CHNL", 4) == 0 && sz >= 4) {
             uint8_t b[4];
             if (fread(b, 1, 4, ctx->f) != 4) break;
             ctx->channels = (uint8_t)be32(b);
             chnl_ok = true;
-            if (sz > 4 && fseek(ctx->f, (long)(sz - 4), SEEK_CUR) != 0) break;
+            if (sz > 4 && fseek(ctx->f, (long)((sz - 4) + (sz & 1)), SEEK_CUR) != 0) break;
         } else if (memcmp(ch, "CMPR", 4) == 0 && sz >= 4) {
             uint8_t b[4];
             if (fread(b, 1, 4, ctx->f) != 4) break;
@@ -230,7 +230,7 @@ static esp_err_t parse_dff(dsd_ctx_t *ctx)
                 ESP_LOGE(TAG, "DFF: неизвестная компрессия %.4s", (const char *)b);
                 return ESP_ERR_NOT_SUPPORTED;
             }
-            if (sz > 4 && fseek(ctx->f, (long)(sz - 4), SEEK_CUR) != 0) break;
+            if (sz > 4 && fseek(ctx->f, (long)((sz - 4) + (sz & 1)), SEEK_CUR) != 0) break;
         } else if (memcmp(ch, "DST ", 4) == 0 && ctx->is_dst) {
             esp_err_t e = parse_dst_container(ctx, sz);
             if (e != ESP_OK) return e;
@@ -243,8 +243,8 @@ static esp_err_t parse_dff(dsd_ctx_t *ctx)
             /* чанк без тела при нулевом размере: иначе цикл зациклится */
             break;
         } else {
-            /* прочие чанки (ABSS, COMT, ...) — пропускаем */
-            if (fseek(ctx->f, (long)sz, SEEK_CUR) != 0) break;
+            /* прочие чанки (ABSS, COMT, ...) — пропускаем с pad-байтом (IFF) */
+            if (fseek(ctx->f, (long)(sz + (sz & 1)), SEEK_CUR) != 0) break;
         }
         if (sz > (1ULL << 40)) return ESP_ERR_NOT_SUPPORTED;   /* защита от кривого файла */
     }
@@ -294,7 +294,11 @@ static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size)
         ESP_LOGE(TAG, "DST: frameRate=%u — поддерживается только 75 Гц", frate);
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (pos & 1) pos++;
+    if (pos & 1) {
+        /* pad-байт после нечётных данных FRTE (6 байт) — правило IFF */
+        pos++;
+        if (fseek(ctx->f, 1, SEEK_CUR) != 0) return ESP_ERR_INVALID_STATE;
+    }
 
     long cur = ftell(ctx->f);
     if (cur < 0) return ESP_ERR_INVALID_STATE;
@@ -519,7 +523,7 @@ size_t dsd_read_dop(dsd_handle_t h, int32_t *out, size_t max_samples, bool *eof)
         produced++;
     }
 
-    if (eof) *eof = (produced < max_frames);   /* досрочно — значит данные кончились */
+    if (eof) *eof = (produced < max_frames);
     return produced * 2;
 }
 

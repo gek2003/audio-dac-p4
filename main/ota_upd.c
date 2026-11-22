@@ -66,6 +66,26 @@ static void set_msg(const char *fmt, ...)
 }
 
 ota_upd_state_t ota_upd_state(void)     { return s_state; }
+
+/* Подтверждение текущего образа (rollback): PENDING_VERIFY -> VALID. */
+esp_err_t ota_upd_confirm_app(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) != ESP_OK) {
+        return ESP_ERR_NOT_SUPPORTED;   /* otadata отсутствует/не OTA-раздел */
+    }
+    if (st != ESP_OTA_IMG_PENDING_VERIFY) {
+        return ESP_OK;                  /* уже подтверждён */
+    }
+    esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+    if (e == ESP_OK) {
+        ESP_LOGI(TAG, "OTA: прошивка подтверждена, откат отменён");
+    } else {
+        ESP_LOGW(TAG, "OTA: confirm: 0x%x", e);
+    }
+    return e;
+}
 int  ota_upd_progress(void)             { return s_progress; }
 const char *ota_upd_msg(void)           { return s_msg; }
 
@@ -324,11 +344,8 @@ static esp_err_t start_job(bool is_file, const char *source)
         ESP_LOGI(TAG, "Проверяю файл: %s", job->source);
         FILE *f = fopen(job->source, "rb");
         if (f == NULL) {
-            char src[256];
-            strlcpy(src, job->source, sizeof(src));
+            set_msg("не открыть файл: %s", job->source);
             free(job);
-            job = NULL;
-            set_msg("не открыть файл: %s", src);   // job уже освобождён
             return ESP_ERR_NOT_FOUND;
         }
         fseek(f, 0, SEEK_END);

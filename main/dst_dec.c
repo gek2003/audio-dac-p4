@@ -85,20 +85,22 @@ static int gb_get_bits_left(dst_handle_t s) {
     return (int)(s->bit_len - s->bit_pos);
 }
 
-/* Урезанный get_ur_golomb_jpegls (только то, что использует DST) */
+/* get_ur_golomb_jpegls — сверено с ffmpeg libavcodec/golomb.h (LGPL-2.1+),
+ * не-cached ветка: значение = (i << k) + bits, где i = число считанных нулей
+ * (unary), bits — следующие k бит. limit = биты до конца потока (esc_len = 0,
+ * как вызывает DST-декодер). Возврат -1 на ошибке/обрыве потока. */
 static int get_ur_golomb_jpegls(dst_handle_t s, int k) {
     int i;
-    for (i = 0; i < 32 && gb_get_bits(s, 1) == 0; i++) {
-        if (s->bit_pos >= s->bit_len) return -1;
+    int limit = gb_get_bits_left(s);
+    if (limit <= 0) return -1;
+    for (i = 0; i < limit && gb_get_bits(s, 1) == 0; i++) { }
+    if (i >= limit - 1) return -1;          /* esc_len == 0: край = ошибка */
+    int buf = 0;
+    if (k > 0) {
+        buf = gb_get_bits(s, k);
+        if (buf < 0) return -1;
     }
-    if (i == 32) return -1;
-    int val = 0;
-    for (int j = 0; j < k; j++) {
-        int b = gb_get_bits(s, 1);
-        if (b < 0) return -1;
-        val = (val << 1) | b;
-    }
-    return (i << k) + val - (1 << k) + 1;
+    return (i << k) + buf;
 }
 
 static int get_sr_golomb_dst(dst_handle_t s, unsigned int k) {

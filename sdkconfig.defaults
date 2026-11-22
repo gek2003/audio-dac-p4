@@ -46,6 +46,8 @@ CONFIG_TINYUSB_MSC_BUFSIZE=8192   # P4: ~4.7 МБ/с чтение, ~2.1 МБ/с 
 # и reconfigure обязательны; таблица затирает старую разметку flash).
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+# OTA: откат на предыдущий образ, если новая прошивка не подтверждена
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # --- Waveshare ESP32-P4 Flash size 32 MB
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y

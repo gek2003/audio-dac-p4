@@ -22,7 +22,6 @@
  */
 
 #pragma once
-const char *ota_upd_version(void);
 
 #include <stddef.h>
 #include "esp_err.h"
@@ -51,6 +50,13 @@ ota_upd_state_t ota_upd_state(void);
 int             ota_upd_progress(void);      /* 0..100, -1 = неизвестно */
 const char     *ota_upd_msg(void);           /* "" если нет */
 
+/* Подтвердить текущую прошивку после успешного старта (если включён
+ * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE): PENDING_VERIFY -> VALID, откат
+ * отменяется. Вызывать из app_main после успешной инициализации. Без
+ * rollback-конфига — no-op. */
+esp_err_t ota_upd_confirm_app(void);
+
 #ifdef __cplusplus
 }
 #endif
+const char *ota_upd_version(void);

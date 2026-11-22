@@ -41,6 +41,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "audio_pipeline.h"
+#include "i2s_out.h"
 
 #include "esp_audio_dec_default.h"
 #include "esp_audio_dec_reg.h"
@@ -302,13 +303,24 @@ static void dsd_playback_loop(void)
         ESP_LOGI(TAG, "DSD: %s, %lu Гц (%d кан.) -> Native DSD (DSD%lu)",
                  info.fmt_name, (unsigned long)info.dsd_rate, info.channels,
                  (unsigned long)(info.dsd_rate / 2822400));
+        bool nat_paused = false;
         while (!s_dec.stop_requested) {
+            if (s_dec.paused != nat_paused) {
+                dsd_native_pause(s_dec.paused);
+                nat_paused = s_dec.paused;
+            }
+            if (s_dec.paused) {
+                vTaskDelay(pdMS_TO_TICKS(20));   /* файл не читаем — позиция не растёт */
+                continue;
+            }
             bool eof = false;
             size_t n = dsd_read_raw(dsd, s_dec.out_buf, s_dec.out_buf_size, &eof);
             if (n == 0) break;
             if (dsd_native_write((const uint8_t *)s_dec.out_buf, n) != ESP_OK) break;
+            s_dec.samples += n / 2;   /* позиция для UI: n = байтов интерлива L,R */
             if (eof) break;
         }
+        if (nat_paused) dsd_native_pause(false);
         dsd_close(dsd);
         s_dec.dsd = NULL;
         dsd_native_stop();
@@ -632,6 +644,12 @@ void decoder_pause(void)
 {
     if (!decoder_running() || s_dec.paused) return;
     s_dec.paused = true;
+    if (dsd_native_running()) {
+        /* Native DSD: штатный i2s_out уже в паузе — паузим native-порты,
+         * иначе resume вернёт PCM-порт на GPIO48/47, пока native играет. */
+        dsd_native_pause(true);
+        return;
+    }
     i2s_out_set_paused(true);
     if (http_source_is_stream()) {
         es9039_mute(true);
@@ -642,6 +660,10 @@ void decoder_resume(void)
 {
     if (!s_dec.paused) return;
     s_dec.paused = false;
+    if (dsd_native_running()) {
+        dsd_native_pause(false);
+        return;
+    }
     i2s_out_set_paused(false);
     if (http_source_is_stream()) {
         es9039_mute(false);

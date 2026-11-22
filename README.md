@@ -206,13 +206,15 @@
 - Native DSD (DSD64–DSD512) на ES9039Q2M идёт не через BCK/WS, а по трём линиям: **DATA1 = DSD CH1 (L)**, **DATA2 = DSD CH2 (R)**, **DATA_CLK = бит-клок DSD** (Reg 64/65: DSD_CH1_SOURCE=DATA1, DSD_CH2_SOURCE=DATA2; Note к Reg 57: при AUTO_INPUT_SEL DSD-линии обязаны быть на DATA1/DATA2). BCK/WS чипом в этом режиме не читаются.
 - На плате Arvin DAC разведён только DATA1 (штатный «DATA» GPIO48). **DATA2 (пин 14 чипа) и DATA_CLK (пин 12 чипа) требуют пайки** от P4 (по умолчанию в патче: DATA2→GPIO49, DATA_CLK→GPIO50 — константы в dsd_native.h, сверить по схеме платы). Без этих проводов native DSD физически не подаётся — веб-кнопка «Native» откатится на DoP с логом.
 - P4: два I²S-порта — A (TX master, слоты 8 бит, BCLK = 64·fs, dout → DATA1) и B (TX slave, BCLK/WS — входы от порт A, dout → DATA2). Пишутся из одной задачи: порт A — [L,0]-интерлив, порт B — [R,0]-интерлив. Регистры: `es9039_set_input(ES9039_INPUT_DSD)` (Reg1=0x82, Reg57=0x41 AUTO) при старте, обратно PCM при завершении; MCLK остаётся от локального генератора (DSD-ASYNC: MCLK 6·fs…50 МГц, DSD64–DSD512).
-- Управление: кнопки **DoP / Native** в веб-пульте (блок DSD mode), `POST /api/dsd?v=0|1`, поле `dsd` в `/api/status`; сохраняется в NVS (`dac/dsd_mode`), применяется при старте.
+- Управление: кнопки **DoP / Native** в веб-пульте (блок DSD mode), `POST /api/dsd?v=0|1`, поле `dsd` в `/api/status`; сохраняется в NVS (`dac/dsd_mode`), применяется при старте. На время native штатный PCM-порт ставится в паузу (`i2s_out_set_paused(true)`) — иначе два DMA дерутся за GPIO48/GPIO47; позиция трека в UI идёт по сэмплам.
 - Риск: TX-slave на P4 и фазировка двух портов — проверить на бенче; при сбоях — DoP.
+- Пауза/восстановление: dsd_native_pause(true) останавливает клок (ES9039 по fault-detect уходит в тишину, позиция файла не двигается); при снятии — клок возвращается и Reg1/57 переписываются. decoder_pause/resume различают native через dsd_native_running().
 
 ### 7д.2 DST-сжатие DFF (dst_dec.c)
 - DST — сжатие DSD (ISO/IEC 14496-3 subpart 10, стандарт SACD). Структура DSDIFF (spec v1.5): чанк **«DST »** содержит под-чанки: **FRTE** (обязательно первым: numFrames u32 BE + frameRate u16 BE = 75), последовательные **DSTF** (сжатые фреймы, каждый декодируется независимо) и опциональные **DSTC** (CRC 4 байта после каждого DSTF; pad-байт после нечётного ckDataSize пропускается).
 - Размер декодированного фрейма: `DSD_rate/75` бит на канал (DSD64: 4704 бит = 588 байт/канал); вывод — интерлив L,R MSB-first (как DFF «DSD ») — совместим с пайплайном DoP/native напрямую.
 - Декодер — перенос libavcodec/dstdec.c (FFmpeg, **LGPL-2.1+**, (c) 2014 Peter Ross): bit reader, арифметический декодер, таблицы filter/probability sets. Поддержаны same segmentation/mapping, 1–2 канала, DSD64/128/256 (кратно 44100). Сбойные фреймы пропускаются с повтором предыдущего.
+- Golomb-формула сверена с ffmpeg libavcodec/golomb.h (не-cached ветка): value = (i << k) + bits, где i — число нулей; прежняя формула с −(1<<k)+1 была неверна — заменена.
 - DSF с format id = 1 (DST в DSF) — **не поддерживается** (в логе подсказка использовать DFF). Seek в DST — последовательный пропуск DSTF/DSTC-заголовков (75 фрейм/с — быстро).
 - Не проверен на реальном SACD-DFF (нет примера в среде подготовки) — проверьте на своём файле; при сбоях декодера смотрите лог повторов фреймов.
 

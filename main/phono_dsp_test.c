@@ -38,7 +38,7 @@ static float measure(phono_ch_t *c, hpf_mode_t m, float f, int nsamp) {
     osc_t o = { 2.0f * 3.14159265358979f * f / 192000.0f, 0.0f };
     float acc = 0.0f; int n_acc = 0;
     for (int i = 0; i < nsamp; i++) {
-        hpf_engine_poll(&c->hpf);   // c — указатель
+        hpf_engine_poll(&c->hpf);
         float y = phono_process(c, osc_step(&o) * 0.1f);
         if (i >= nsamp / 2) { acc += y * y; n_acc++; }
     }
