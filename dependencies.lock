@@ -304,6 +304,6 @@ direct_dependencies:
 - idf
 - lvgl/lvgl
 - waveshare/esp_lcd_hx8394
-manifest_hash: 0d32fadb3d4e3a30e068324f68d1bcb4c32b1e52de3ecd5d7a0aeae815a47057
+manifest_hash: 31bf6726f4ea150e0c745247a1c93b370b5b952f08d62cd2303f6f86aa30aef0
 target: esp32p4
 version: 3.0.0
