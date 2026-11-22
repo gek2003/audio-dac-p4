@@ -105,11 +105,12 @@
 
 ### 11. Веб-пульт (web_ctrl.c)
 - Мини-HTTP-сервер (esp_http_server, порт 80) стартует в main.c после Wi-Fi; доступ — через те же ui_hooks_t, что и UI: громкость/mute/next/prev/источник выполняются ровно тем же кодом (NVS-сохранение громкости работает).
+- HTML/CSS/JS пульта вынесены в `main/web_root.h` (автогенерируется: правки — в `tools/web_page.html`, затем `python tools/gen_web_root.py` из корня проекта); в `web_ctrl.c` — только сервер и REST API.
 - Эндпойнты: GET / (HTML-пульт), GET /api/status, POST /api/volume?v=0..100, POST /api/mute[?on=], POST /api/play, POST /api/next|prev, POST /api/seek?ms= (MP3/DSD, включая DST-DFF), POST /api/src?u=, GET /api/files?path=[&root=usb|sd][&off=0&lim=200] (пагинация: ответ содержит count/off/items, веб-подгружает по 100 записей, «… ещё N» внизу), POST /api/playfile?p=[&root=usb], GET /api/stations, POST /api/station?i=, GET /api/diag, POST /api/phono, POST /api/hpf?v=0|1|2, POST /api/dsd?v=0|1 (DoP/Native), POST /api/ota?file=|u=.
 - HTML-пульт: статус (state/IP/SSID/vol/fs/dsd/hpf), прогресс с кликом-перемоткой (если seekable), слайдер громкости, play/prev/next, URL источника, навигация по SD/USB и станции, блок DSD mode (DoP/Native), кнопка PHONO и блок Phono subsonic HPF. Обновление статуса раз в 2 с. CORS включён.
 - Безопасность: без аутентификации (домашняя сеть; не выставлять в интернет).
 - Ограничения: смена источника не блокирует httpd (асинхронный decoder_request, P2); громкость с телефона не отражается на слайдере экрана до пересборки UI (TODO: лёгкая синхронизация в prog_tick).
-- Подсказка DSD mode: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и применение со следующего DSD-трека**.**.
+- Подсказка DSD mode: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и применение со следующего DSD-трека.
 
 ### 12. OTA-обновление прошивки (ota_upd.c)
 - Требуется таблица разделов `partitions.csv` (ota_0 + ota_1, идёт в патче): дефолтная single-app таблица OTA не поддерживает. Первая прошивка этой таблицы — **только по кабелю**: `idf.py fullclean`, затем `reconfigure` (в sdkconfig.defaults добавлена `CONFIG_PARTITION_TABLE_CUSTOM`), затем `flash`. После этого обновления — без кабеля.
@@ -236,6 +237,12 @@
 
 ---
 
+## 18. P4a: веб-страница в web_root.h
+- HTML/CSS/JS пульта вынесены из web_ctrl.c в main/web_root.h (совпадение со старой страницей байт-в-байт, web_ctrl.c −130 строк исходника).
+- Правки страницы: только tools/web_page.html + запуск `python tools/gen_web_root.py` из корня проекта; ручные правки web_root.h затираются генератором.
+
+---
+
 ## Сборка
 
 ```bash
@@ -255,7 +262,8 @@ idf.py build flash monitor
 - `v1.2-phono_adc_patch` — фикс вызова i2s_new_channel в phono_adc, чистая сборка.
 - `dsd_dst_patch` — первый патч DST/native-DSD (содержал ошибки сборки, оставлен в истории).
 - `dsd_p1p2_fix_patch` — фичи DST + native DSD поверх восстановленных фикс-правок (веб-пульт и флешка возвращены в main.c, добавлен i2s_out.h, OTA-confirm, NVS-фиксы web_ctrl, обновлён dependencies.lock).
-- `player_p2p3_patch` — **актуальный**: P2 (асинхронный `decoder_request`, мьютексы декодера и хуков), P3 (пагинация `/api/files`, счётчик DST-ошибок, подсказка DSD mode в вебе); исправлены регрессии патча (API `i2s_new_channel`, `c->hpf` в тесте, use-after-free, недостающие include, отсутствовавший `decoder_request`).
+- `player_p2p3_patch` — P2 (асинхронный `decoder_request`, мьютексы декодера и хуков), P3 (пагинация `/api/files`, счётчик DST-ошибок, подсказка DSD mode в вебе); исправлены регрессии патча (API `i2s_new_channel`, `c->hpf` в тесте, use-after-free, недостающие include, отсутствовавший `decoder_request`).
+- `dsd_p4a_patch` — **актуальный**: P4a — HTML/CSS/JS веб-пульта вынесены в автогенерируемый `main/web_root.h` (генератор `tools/gen_web_root.py`), README без дублей, журнал патчей перенесён в README.
 
 ## Важно про зависимости
 
@@ -316,6 +324,7 @@ main/
   usb_msc.c/.h               — USB MSC: карта как диск ПК (esp_tinyusb, OTG HS)
   usb_flash.c/.h             — флешка как источник (usb_host_msc, OTG FS, /usb)
   web_ctrl.c/.h              — веб-пульт: HTTP-сервер, REST API, HTML
+  web_root.h                 — автогенерируемая веб-страница пульта (PAGE_HTML)
   ota_upd.c/.h               — OTA: файл с SD или URL, confirm после успешного старта
   phono_adc.c/.h             — АЦП-тракт WM8782: I²S RX 192 кГц + DSP
   pipeline_192k.h            — DSP-ядро фоно (RIAA/HPF, float32)
@@ -333,5 +342,29 @@ docs/
   phono_192k_filters_theory_v4.pdf — теория фильтров, сверка констант, таблицы, графики
 tools/
   gen_fir_coeffs.py          — генератор FIR-наборов
+  gen_web_root.py            — генератор web_root.h из web_page.html
+  web_page.html              — исходник веб-страницы пульта
   generate_fonts.sh          — пересборка шрифтов LVGL
 ```
+
+---
+
+## Журнал патчей
+
+### 3.6.3 (P2/P3): асинхронный декодер, мьютексы, пагинация
+
+- **decoder_start асинхронен**: ringbuf и источник (http/phono/ADC) поднимаются в задаче декодера, а не в вызывающем контексте. Переключение радио больше не блокирует httpd/UI на 1–2 с коннекта.
+- **decoder_request()** — асинхронное переключение источника: если играет — текущее останавливается, новый источник ставится в очередь (`next_url/next_type/next_stream/next_queued` в ctx) и стартует задачей декодера сразу после её выхода. Везде, где было `decoder_stop()+decoder_start()` (set_source_url, next/prev, авто-переход), теперь decoder_request.
+- **Мьютекс декодера** (decoder.c): decoder_start/request/stop/pause/resume под общим мьютексом — двойной старт и потерянный переход исключены. Ожидание выхода задачи под мьютексом не держится (без дедлоков).
+- **Мьютекс хуков** (main.c): громкость/mute/фильтр/FIR/Wi-Fi под общим мьютексом — вызовы из LVGL-задачи и httpd не гонятся. Гонки плейлиста закрыть нечем (playlist.c в патче нет) — отложено.
+- **NVS namespace**: проверено — web_ctrl пишет namespace "dac" ключ "dsd_mode", persist в main.c читает тот же namespace/ключ. Расхождений нет (комментарий добавлен в api_dsd).
+- **/api/files пагинация**: параметры `off` (смещение, дефолт 0) и `lim` (дефолт WEB_FILES_MAX=200, максимум 200). Ответ: `count` (всего), `off`, `items` — срез. Веб-интерфейс: список грузится по 100 записей, внизу «... ещё N» подгружает следующую страницу.
+- **Счётчик DST**: повреждённые DST-фреймы считаются (`s_dst_err_frames`), лог — первая ошибка и далее каждые 16-ю.
+- **Подсказка DSD mode** в веб-интерфейсе: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и «применяется со следующего DSD-трека».
+- Отложено (нужны актуальные файлы): зеркало громкости с телефона на слайдер UI (требуется текущий ui.c — в базовом main.zip он старый, без play_pause/next_track); кэш плейлиста папки (нет playlist.c). Объявление decoder_request — extern в main.c, перенесите в decoder.h при следующей правке.
+
+### 3.7 (P4a): веб-страница в web_root.h, README без дублей
+
+- HTML/CSS/JS пульта вынесены из web_ctrl.c в main/web_root.h (совпадение байт-в-байт, -130 строк RODATA).
+- Правки страницы — только tools/web_page.html + python tools/gen_web_root.py; main/web_root.h автогенерируемый.
+- README почищен от дублей секций (артефакт накопления патчей), история патчей сведена в этот журнал.
