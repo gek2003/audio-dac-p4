@@ -41,7 +41,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "audio_pipeline.h"
-#include "i2s_out.h"
 
 #include "esp_audio_dec_default.h"
 #include "esp_audio_dec_reg.h"
@@ -55,6 +54,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 /* Прототип из es9039q2m_esp32p4_driver.c (файл без отдельного .h) */
 extern esp_err_t es9039_switch_frequency(void (*apply_cb)(void *), void *arg,
@@ -628,6 +628,85 @@ void decoder_stop(void)
 bool decoder_running(void)
 {
     return s_dec.task != NULL && !s_dec.stop_requested;
+}
+
+/* ---------------- Асинхронное переключение источника (P2) ----------------
+ * decoder_request(): не блокирует вызывающий поток (httpd/UI) на время
+ * decoder_stop()+decoder_start(). Запрос кладётся в один слот — последний
+ * выигрывает; отрабатывает постоянная задача dec_req: дожидается выхода
+ * текущей задачи декодера и стартует новый источник. Если новый запрос
+ * пришёл во время обработки — применится сразу после завершения текущего.
+ * ------------------------------------------------------------------------ */
+static SemaphoreHandle_t s_req_mux     = NULL;   /* защита слота запроса */
+static SemaphoreHandle_t s_req_sem     = NULL;   /* сигнал задачи dec_req */
+static char              s_req_url[512];
+static decoder_type_t    s_req_type;
+static volatile bool     s_req_pending = false;
+
+static void decoder_request_task(void *arg)
+{
+    (void)arg;
+    char url[512];
+    decoder_type_t type;
+    for (;;) {
+        xSemaphoreTake(s_req_sem, portMAX_DELAY);
+        for (;;) {
+            bool have = false;
+            if (xSemaphoreTake(s_req_mux, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                have = s_req_pending;
+                if (have) {
+                    strlcpy(url, s_req_url, sizeof(url));
+                    type = s_req_type;
+                    s_req_pending = false;
+                }
+                xSemaphoreGive(s_req_mux);
+            }
+            if (!have) {
+                break;
+            }
+            if (decoder_running()) {
+                decoder_stop();   /* ожидание выхода задачи — но уже не в httpd */
+            }
+            esp_err_t e = decoder_start(url, type, false);
+            if (e != ESP_OK) {
+                ESP_LOGW(TAG, "decoder_request(%s): %s", url, esp_err_to_name(e));
+            }
+        }
+    }
+}
+
+esp_err_t decoder_request(const char *url, decoder_type_t type, bool is_stream_hint)
+{
+    (void)is_stream_hint;
+    if (url == NULL || strlen(url) >= sizeof(s_req_url)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_req_sem == NULL) {
+        SemaphoreHandle_t mux = xSemaphoreCreateMutex();
+        SemaphoreHandle_t sem = xSemaphoreCreateBinary();
+        if (mux == NULL || sem == NULL) {
+            if (mux) vSemaphoreDelete(mux);
+            if (sem) vSemaphoreDelete(sem);
+            return ESP_ERR_NO_MEM;
+        }
+        s_req_mux = mux;
+        s_req_sem = sem;
+        if (xTaskCreate(decoder_request_task, "dec_req", 6144, NULL,
+                        DEC_TASK_PRIO - 1, NULL) != pdPASS) {
+            vSemaphoreDelete(s_req_mux); s_req_mux = NULL;
+            vSemaphoreDelete(s_req_sem); s_req_sem = NULL;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (xSemaphoreTake(s_req_mux, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    strlcpy(s_req_url, url, sizeof(s_req_url));
+    s_req_type = type;
+    s_req_pending = true;
+    xSemaphoreGive(s_req_mux);
+    xSemaphoreGive(s_req_sem);   /* если хелпер занят — подберёт в следующей итерации */
+    return ESP_OK;
 }
 
 void decoder_set_type(decoder_type_t type)

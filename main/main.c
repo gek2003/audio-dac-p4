@@ -31,6 +31,8 @@
 
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "audio_pipeline.h"
 #include "es9039q2m_esp32p4_driver.h"
@@ -40,10 +42,8 @@
 #include "playlist.h"
 #include "ui.h"
 #include "dsd_native.h"
-#include "ota_upd.h"
-#include "web_ctrl.h"
-#include "usb_flash.h"
 #include "dsd_dec.h"
+#include "ota_upd.h"
 
 static const char *TAG = "main";
 
@@ -219,41 +219,68 @@ static void vol_apply(float db)
     (void)es9039_set_volume_db(db);
 }
 
+/* Асинхронное переключение источника: объявление стоит добавить в decoder.h
+ * при следующей правке; здесь — extern, чтобы патч не включал decoder.h целиком. */
+extern esp_err_t decoder_request(const char *url, decoder_type_t type,
+                                 bool is_stream_hint);
+
+/* --- Мьютекс хуков UI/web: хуки зовутся из LVGL-задачи и из httpd ----------
+ * Гонка декодера (двойной start/переключение) закрыта мьютексом в decoder.c;
+ * здесь защищаем хуки, меняющие состояние ЦАП/NVS: громкость, mute, фильтры,
+ * Wi-Fi. Долгих операций под мьютексом нет (persist — отложенный таймер). */
+static SemaphoreHandle_t s_hooks_mutex = NULL;
+static bool hook_lock(void)
+{
+    if (s_hooks_mutex == NULL) s_hooks_mutex = xSemaphoreCreateMutex();
+    return xSemaphoreTake(s_hooks_mutex, pdMS_TO_TICKS(200)) == pdTRUE;
+}
+static void hook_unlock(void)
+{
+    if (s_hooks_mutex != NULL) xSemaphoreGive(s_hooks_mutex);
+}
+
 static void ui_h_set_volume(float db)
 {
+    if (!hook_lock()) return;
     vol_apply(db);
     s_vol_dirty = true;
     persist_schedule();   /* отложенная запись — см. комментарий выше */
+    hook_unlock();
 }
 /* Mute не сохраняется в NVS (специально): случайный mute не должен «прилипать»
  * после перезапуска. Но состояние держим в ОЗУ — чтобы UI после пересборки
  * (смена языка) показывал актуальное. */
 static bool s_mute_state = false;
 
-static void ui_h_set_mute(bool on)         { s_mute_state = on; (void)es9039_mute(on); }
+static void ui_h_set_mute(bool on)         { if (hook_lock()) { s_mute_state = on; (void)es9039_mute(on); hook_unlock(); } }
 static void ui_h_set_filter(int preset)
 {
+    if (!hook_lock()) return;
     s_filter_sel = preset;
     flt_apply_by_index(preset);
     s_flt_dirty = true;
     persist_schedule();
+    hook_unlock();
 }
 /* Wi-Fi: сохранить креды в NVS и применить сразу (wifi_set_credentials
  * при уже поднятом стеке сам переподключается). */
 static void ui_h_set_wifi(const char *ssid, const char *pass)
 {
+    if (!hook_lock()) return;
     persist_save_str(WIFI_SSID_NVS_KEY, ssid ? ssid : "");
     persist_save_str(WIFI_PASS_NVS_KEY, pass ? pass : "");
     esp_err_t e = wifi_set_credentials(ssid, pass);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "wifi_set_credentials(%s): %s", ssid ? ssid : "?", esp_err_to_name(e));
     }
+    hook_unlock();
 }
 
 static const char *ui_h_get_wifi_ssid(void) { return wifi_get_ssid(); }
 
 /* URL источника: сохранить в NVS и перезапустить декодер на лету.
- * decoder_stop() ждёт до 2 с — UI на это время замирает (редкая операция). */
+ * decoder_request() асинхронен: не ждёт выхода задачи декодера и не блокирует
+ * httpd/UI (коннект HTTP нового источника поднимается в задаче декодера). */
 static void ui_h_set_source_url(const char *url)
 {
     if (!url || strlen(url) == 0) return;
@@ -267,10 +294,9 @@ static void ui_h_set_source_url(const char *url)
             wifi_on();    /* спящий режим: радио включило Wi-Fi */
         }
     }
-    if (decoder_running()) decoder_stop();
-    esp_err_t e = decoder_start(s_url, DEC_TYPE_AUTO, false);
+    esp_err_t e = decoder_request(s_url, DEC_TYPE_AUTO, false);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "decoder_start(%s): %s", s_url, esp_err_to_name(e));
+        ESP_LOGW(TAG, "decoder_request(%s): %s", s_url, esp_err_to_name(e));
     }
 }
 
@@ -284,10 +310,12 @@ static void ui_h_set_fir(int fir)
      * смене частоты потока его не перекрывает (см. es9039_fir.h).
      * verify=true: контрольная перечитка RAM при ручном переключении; заливка
      * без mute — если играет звук, возможен короткий глитч. */
+    if (!hook_lock()) return;
     s_fir_sel = fir;
     fir_apply_by_index(fir);
     s_fir_dirty = true;
     persist_schedule();
+    hook_unlock();
 }
 
 /* --- Управление воспроизведением: плейлист, next/prev, авто-переход ------- */
@@ -299,10 +327,9 @@ static void play_current_track(void)
     if (path == NULL) return;
     snprintf(s_url, sizeof(s_url), "file://%.504s", path);
     persist_save_str(SRC_URL_NVS_KEY, s_url);
-    if (decoder_running()) decoder_stop();
-    esp_err_t e = decoder_start(s_url, DEC_TYPE_AUTO, false);
+    esp_err_t e = decoder_request(s_url, DEC_TYPE_AUTO, false);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "decoder_start(%s): %s", s_url, esp_err_to_name(e));
+        ESP_LOGW(TAG, "decoder_request(%s): %s", s_url, esp_err_to_name(e));
     }
 }
 
@@ -382,8 +409,7 @@ static void ui_h_prev_track(void)
         play_current_track();
     } else if (playlist_active()) {
         /* начало очереди — перезапуск текущего трека (стандартное поведение) */
-        if (decoder_running()) decoder_stop();
-        decoder_start(s_url, DEC_TYPE_AUTO, false);
+        decoder_request(s_url, DEC_TYPE_AUTO, false);
     }
 }
 
@@ -515,24 +541,6 @@ static void init_nvs(void)
     }
 }
 
-/* --- Флешка на USB OTG FS (usb_flash.c): хуки жизненного цикла --- */
-static void usb_on_mounted(void)
-{
-    ESP_LOGI(TAG, "USB: флешка смонтирована в /usb");
-}
-
-static void usb_on_unmounted(void)
-{
-    /* Извлечение во время воспроизведения — глушим декодер, иначе stdio
-     * чтение с исчезнувшего носителя даст поток ошибок. */
-    if (strncmp(s_url, "file:///usb/", 12) == 0) {
-        if (decoder_running()) {
-            decoder_stop();
-        }
-        ESP_LOGW(TAG, "USB: флешка извлечена — воспроизведение остановлено");
-    }
-}
-
 void app_main(void)
 {
     init_nvs();
@@ -584,9 +592,6 @@ void app_main(void)
                  esp_err_to_name(werr));
     }
 
-    /* --- Веб-пульт: HTTP-сервер на порту 80 (те же хуки, что и UI) --- */
-    (void)web_ctrl_start(&s_ui_hooks);
-
     /* --- SD-карта: инициализация + USB MSC (карта как USB-диск ПК) --- */
     esp_err_t sderr = sd_card_init();
     if (sderr == ESP_OK) {
@@ -601,13 +606,6 @@ void app_main(void)
                      esp_err_to_name(uerr));
         }
     }
-
-    /* --- Флешка на втором USB-порту (OTG FS) --- */
-    usb_flash_set_hooks(&(usb_flash_hooks_t){
-        .on_mounted   = usb_on_mounted,
-        .on_unmounted = usb_on_unmounted,
-    });
-    (void)usb_flash_init();
 
     /* --- Воспроизведение --- */
     /* SD-карта — источник по умолчанию: если готова и на ней есть аудиофайл,

@@ -77,6 +77,7 @@
 - **Плейлист и авто-переход** (playlist.c): очередь из .m3u или из папки (неявно, отсортированная по имени); по концу трека — авто-переход к следующему, next/prev — соседние треки; prev в начале очереди перезапускает текущий трек.
 - Вкладка «Сеть»: смена URL на лету (декодер перезапускается, URL сохраняется).
 - Буферизация: ringbuf 256 КБ в PSRAM.
+- **Асинхронный декодер (P2)**: ringbuf и источник (http/phono/ADC) поднимаются в задаче декодера, а не в вызывающем контексте; переключение источников — через `decoder_request()` (текущее останавливается, новое встаёт в очередь и стартует сразу после выхода задачи) — переключение радио больше не блокирует httpd/UI на 1–2 с. `decoder_start/request/stop/pause/resume` — под общим мьютексом декодера; хуки громкости/mute/фильтра/FIR в main.c — под общим мьютексом хуков (гонки плейлиста отложены — playlist.c вне патча).
 
 ### 8. SD-карта как USB-диск для ПК (на лету)
 - MSC-класс через espressif/esp_tinyusb ^3.0 (OTG High-Speed P4): ПК видит карту как сменный диск.
@@ -104,10 +105,11 @@
 
 ### 11. Веб-пульт (web_ctrl.c)
 - Мини-HTTP-сервер (esp_http_server, порт 80) стартует в main.c после Wi-Fi; доступ — через те же ui_hooks_t, что и UI: громкость/mute/next/prev/источник выполняются ровно тем же кодом (NVS-сохранение громкости работает).
-- Эндпойнты: GET / (HTML-пульт), GET /api/status, POST /api/volume?v=0..100, POST /api/mute[?on=], POST /api/play, POST /api/next|prev, POST /api/seek?ms= (MP3/DSD, включая DST-DFF), POST /api/src?u=, GET /api/files?path=[&root=usb|sd], POST /api/playfile?p=[&root=usb], GET /api/stations, POST /api/station?i=, GET /api/diag, POST /api/phono, POST /api/hpf?v=0|1|2, POST /api/dsd?v=0|1 (DoP/Native), POST /api/ota?file=|u=.
+- Эндпойнты: GET / (HTML-пульт), GET /api/status, POST /api/volume?v=0..100, POST /api/mute[?on=], POST /api/play, POST /api/next|prev, POST /api/seek?ms= (MP3/DSD, включая DST-DFF), POST /api/src?u=, GET /api/files?path=[&root=usb|sd][&off=0&lim=200] (пагинация: ответ содержит count/off/items, веб-подгружает по 100 записей, «… ещё N» внизу), POST /api/playfile?p=[&root=usb], GET /api/stations, POST /api/station?i=, GET /api/diag, POST /api/phono, POST /api/hpf?v=0|1|2, POST /api/dsd?v=0|1 (DoP/Native), POST /api/ota?file=|u=.
 - HTML-пульт: статус (state/IP/SSID/vol/fs/dsd/hpf), прогресс с кликом-перемоткой (если seekable), слайдер громкости, play/prev/next, URL источника, навигация по SD/USB и станции, блок DSD mode (DoP/Native), кнопка PHONO и блок Phono subsonic HPF. Обновление статуса раз в 2 с. CORS включён.
 - Безопасность: без аутентификации (домашняя сеть; не выставлять в интернет).
-- Ограничения: смена источника блокирует httpd-таск до ~1-2 с (рестарт декодера); громкость с телефона не отражается на слайдере экрана до пересборки UI (TODO: лёгкая синхронизация в prog_tick); хуки не мьютексированы (как и для UI).
+- Ограничения: смена источника не блокирует httpd (асинхронный decoder_request, P2) (рестарт декодера); громкость с телефона не отражается на слайдере экрана до пересборки UI (TODO: лёгкая синхронизация в prog_tick); хуки не мьютексированы (как и для UI).
+- Подсказка DSD mode: под кнопками DoP/Native пояснение про проводку DATA2/DATA_CLK и применение со следующего DSD-трека
 
 ### 12. OTA-обновление прошивки (ota_upd.c)
 - Требуется таблица разделов `partitions.csv` (ota_0 + ota_1, идёт в патче): дефолтная single-app таблица OTA не поддерживает. Первая прошивка этой таблицы — **только по кабелю**: `idf.py fullclean`, затем `reconfigure` (в sdkconfig.defaults добавлена `CONFIG_PARTITION_TABLE_CUSTOM`), затем `flash`. После этого обновления — без кабеля.
@@ -215,6 +217,7 @@
 - Golomb-формула сверена с ffmpeg libavcodec/golomb.h (не-cached ветка): value = (i << k) + bits, где i — число нулей; прежняя формула с −(1<<k)+1 была неверна — заменена.
 - DSF с format id = 1 (DST в DSF) — **не поддерживается** (в логе подсказка использовать DFF). Seek в DST — последовательный пропуск DSTF/DSTC-заголовков (75 фрейм/с — быстро).
 - Не проверен на реальном SACD-DFF (нет примера в среде подготовки) — проверьте на своём файле; при сбоях декодера смотрите лог повторов фреймов.
+- Счётчик повреждённых DST-фреймов (`s_dst_err_frames`): в логе первая ошибка и далее каждая 16-я — для диагностики качества файла.
 
 ### 15.3 Компиляция и файлы патча
 - `main/dsd_native.c/.h`, `main/dst_dec.c/.h`, патчи `main/dsd_dec.c/.h` (DST-контейнер, `dsd_read_raw`, `dsd_play_mode_get/set`, DST-seek), `main/decoder.c` (native-ветка с автофолбэком на DoP), `main/web_ctrl.c` (кнопки DoP/Native, поле `dsd` в статусе, `/api/dsd`), `main/main.c` (NVS `dsd_mode` при старте), `main/CMakeLists.txt` (+dst_dec.c, +dsd_native.c), плюс новый `main/i2s_out.h` (прототипы i2s_out_*, включая set_paused/paused — их нет в audio_pipeline.h).
@@ -251,7 +254,8 @@ idf.py build flash monitor
 - `v1.1-usb-api-fix` — правки USB MSC API.
 - `v1.2-phono_adc_patch` — фикс вызова i2s_new_channel в phono_adc, чистая сборка.
 - `dsd_dst_patch` — первый патч DST/native-DSD (содержал ошибки сборки, оставлен в истории).
-- `dsd_p1p2_fix_patch` — **актуальный**: фичи DST + native DSD поверх восстановленных фикс-правок (веб-пульт и флешка возвращены в main.c, добавлен i2s_out.h, OTA-confirm, NVS-фиксы web_ctrl, обновлён dependencies.lock).
+- `dsd_p1p2_fix_patch` — фичи DST + native DSD поверх восстановленных фикс-правок (веб-пульт и флешка возвращены в main.c, добавлен i2s_out.h, OTA-confirm, NVS-фиксы web_ctrl, обновлён dependencies.lock).
+- `player_p2p3_patch` —  **актуальный**
 
 ## Важно про зависимости
 

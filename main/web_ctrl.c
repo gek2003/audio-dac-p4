@@ -50,7 +50,6 @@
 #include "dsd_native.h"
 #include "ota_upd.h"
 #include "dsd_dec.h"
-#include "nvs_flash.h"
 #include "nvs.h"
 
 static const char *TAG = "web_ctrl";
@@ -367,7 +366,9 @@ static esp_err_t api_dsd(httpd_req_t *req)
         return ESP_OK;
     }
     dsd_play_mode_set((dsd_play_mode_t)v);
-    nvs_handle_t nh;
+    /* Namespace и ключ совпадают с persist в main.c: PERSIST_NVS_NAMESPACE
+     * ("dac") и DSD_MODE_NVS_KEY ("dsd_mode") — при старте читается оттуда же. */
+    nvs_handle_t nh = 0;
     if (nvs_open("dac", NVS_READWRITE, &nh) == ESP_OK) {
         nvs_set_u8(nh, "dsd_mode", (uint8_t)v);
         nvs_commit(nh);
@@ -505,15 +506,27 @@ static esp_err_t api_files(httpd_req_t *req)
         }
     }
 
+    /* Пагинация: off/lim из query. Без параметров поведение прежнее
+     * (все записи, лимит WEB_FILES_MAX). lim срезает ответ, чтобы большой
+     * каталог не упирался в буфер httpd. */
+    char off_s[16] = "", lim_s[16] = "";
+    (void)get_query(req, "off", off_s, sizeof(off_s));
+    (void)get_query(req, "lim", lim_s, sizeof(lim_s));
+    int off = (off_s[0] ? atoi(off_s) : 0);
+    int lim = (lim_s[0] ? atoi(lim_s) : WEB_FILES_MAX);
+    if (off < 0) off = 0;
+    if (off > n) off = n;
+    if (lim <= 0 || lim > WEB_FILES_MAX) lim = WEB_FILES_MAX;
+
     size_t o = 0;
     char *buf = s_buf_b;
     o += (size_t)snprintf(buf + o, WEB_BUF_FILES - o,
-                          "{\"path\":\"%s\",\"count\":%d,\"items\":[", rel, n);
-    for (int i = 0; i < n && o < WEB_BUF_FILES - 300; i++) {
+                          "{\"path\":\"%s\",\"count\":%d,\"off\":%d,\"items\":[", rel, n, off);
+    for (int i = off; i < n && i < off + lim && o < WEB_BUF_FILES - 300; i++) {
         char esc[280];
         json_escape(ents[i].name, esc, sizeof(esc));
         o += (size_t)snprintf(buf + o, WEB_BUF_FILES - o, "%s{\"name\":\"%s\",\"dir\":%s}",
-                              i ? "," : "", esc, ents[i].is_dir ? "true" : "false");
+                              (i > off) ? "," : "", esc, ents[i].is_dir ? "true" : "false");
     }
     snprintf(buf + o, WEB_BUF_FILES - o, "]}");
     send_json(req, buf, 200);
@@ -703,6 +716,7 @@ static const char PAGE_HTML[] =
 "<div class='row'>"
 "<button id='dsd0' onclick=\"api('/api/dsd?v=0').then(tick)\">DoP</button>"
 "<button id='dsd1' onclick=\"api('/api/dsd?v=1').then(tick)\">Native</button></div>"
+"<div class='dim' id='dsdhint'>Native: нужна проводка DATA2/DATA_CLK (GPIO49/50); применяется со следующего DSD-трека</div>"
 "<div class='lbl'>Radio stations</div><ul id='stl'></ul>"
 "<div class='lbl'>Firmware</div>"
 "<div class='row'>"
@@ -711,7 +725,7 @@ static const char PAGE_HTML[] =
 "<button onclick='otaFromSd()'>SD</button></div>"
 "<div id='otast' class='dim'></div>"
 "<script>"
-"let scrubbing=false,stations=[];"
+"let scrubbing=false,stations=[],curPath='',curOff=0;"
 "const $=id=>document.getElementById(id);"
 "$('vl').addEventListener('input',()=>{scrubbing=true});"
 "$('vl').addEventListener('change',()=>{scrubbing=false;tick()});"
@@ -750,22 +764,26 @@ static const char PAGE_HTML[] =
 "function setRoot(r){curRoot=r;"
 "$('btsd').style.background=r=='sd'?'#4a7ba6':'#3a4148';"
 "$('btusb').style.background=r=='usb'?'#4a7ba6':'#3a4148';"
-"loadFiles('')}"
-"function loadFiles(p){"
-"fetch('/api/files?root='+curRoot+(p?'&path='+encodeURIComponent(p):''))"
-".then(r=>r.json()).then(j=>{const el=$('fl');el.innerHTML='';"
+"loadFiles('',0,false)}"
+"function loadFiles(p,off,append){curPath=p;curOff=off;"
+"fetch('/api/files?root='+curRoot+(p?'&path='+encodeURIComponent(p):'')+'&off='+off+'&lim=100')"
+".then(r=>r.json()).then(j=>{const el=$('fl');if(!append){el.innerHTML='';}"
 "if(j.err){el.innerHTML=\"<li class='dim'>\"+j.err+'</li>';return}"
-"if(p){const li=document.createElement('li');li.textContent='.. (up)';"
-"li.onclick=()=>{const i=p.lastIndexOf('/');loadFiles(i>0?p.slice(0,i):'')};"
+"if(!append&&p){const li=document.createElement('li');li.textContent='.. (up)';"
+"li.onclick=()=>{const i=p.lastIndexOf('/');loadFiles(i>0?p.slice(0,i):'',0,false)};"
 "el.appendChild(li)}"
 "if(!j.items||!j.items.length){"
-"el.innerHTML+=\"<li class='dim'>empty</li>\";return}"
+"if(!append)el.innerHTML+=\"<li class='dim'>empty</li>\";return}"
 "j.items.forEach(it=>{const li=document.createElement('li');"
 "li.textContent=(it.dir?'[DIR] ':'')+it.name;"
 "const full=p?(p.endsWith('/')?p:p+'/'+it.name):it.name;"
-"li.onclick=()=>it.dir?loadFiles(full)"
+"li.onclick=()=>it.dir?loadFiles(full,0,false)"
 ":api('/api/playfile?p='+encodeURIComponent(full)+'&root='+curRoot).then(()=>{});"
-"el.appendChild(li)})})}"
+"el.appendChild(li)})"
+"const got=off+j.items.length;"
+"if(j.count>got){const li=document.createElement('li');li.className='dim';"
+"li.textContent='... ещё '+(j.count-got);"
+"li.onclick=()=>loadFiles(curPath,got,true);el.appendChild(li)}})}"
 "setRoot('sd');"
 "function loadStations(){"
 "fetch('/api/stations').then(r=>r.json()).then(j=>{stations=j.items||[];"

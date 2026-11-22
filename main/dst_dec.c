@@ -17,6 +17,13 @@
 
 #include "dst_dec.h"
 
+/* В esp_err.h нет ESP_ERR_INVALID_DATA (нет такого кода в IDF) —
+ * аллеем на существующий INVALID_RESPONSE: семантика для вызывающего
+ * кода идентична (повреждённые данные/фрейм). */
+#ifndef ESP_ERR_INVALID_DATA
+#define ESP_ERR_INVALID_DATA ESP_ERR_INVALID_RESPONSE
+#endif
+
 static const char *TAG = "dst_dec";
 
 #define DST_MAX_CHANNELS 2
@@ -285,7 +292,7 @@ esp_err_t dst_decode_frame(dst_handle_t s, const uint8_t *data, size_t len, uint
     if (!gb_get_bits(s, 1)) {
         /* Несжатый (короткий) фрейм: сырые DSD-байты, паддинг 0x69 */
         gb_get_bits(s, 1);
-        if (gb_get_bits(s, 6) != 0) return ESP_ERR_INVALID_STATE;
+        if (gb_get_bits(s, 6) != 0) return ESP_ERR_INVALID_DATA;
         unsigned total = s->frame_bytes;
         unsigned n = (unsigned)(len - 1) < total ? (unsigned)(len - 1) : total;
         memset(out, 0, total);
@@ -301,24 +308,24 @@ esp_err_t dst_decode_frame(dst_handle_t s, const uint8_t *data, size_t len, uint
 
     unsigned same_map = (unsigned)gb_get_bits(s, 1);
 
-    if (read_map(s, &s->fsets, map_fe, channels) < 0) return ESP_ERR_INVALID_STATE;
+    if (read_map(s, &s->fsets, map_fe, channels) < 0) return ESP_ERR_INVALID_DATA;
     if (same_map) {
         s->probs.elements = s->fsets.elements;
         memcpy(map_pe, map_fe, sizeof(map_fe));
     } else {
-        if (read_map(s, &s->probs, map_pe, channels) < 0) return ESP_ERR_INVALID_STATE;
+        if (read_map(s, &s->probs, map_pe, channels) < 0) return ESP_ERR_INVALID_DATA;
     }
 
     for (ch = 0; ch < (unsigned)channels; ch++)
         half_prob[ch] = (unsigned)gb_get_bits(s, 1);
 
-    if (read_table(s, &s->fsets, fsets_code_pred_coeff, 7, 9, 1, 0) < 0) return ESP_ERR_INVALID_STATE;
-    if (read_table(s, &s->probs, probs_code_pred_coeff, 6, 7, 0, 1) < 0) return ESP_ERR_INVALID_STATE;
+    if (read_table(s, &s->fsets, fsets_code_pred_coeff, 7, 9, 1, 0) < 0) return ESP_ERR_INVALID_DATA;
+    if (read_table(s, &s->probs, probs_code_pred_coeff, 6, 7, 0, 1) < 0) return ESP_ERR_INVALID_DATA;
 
-    if (gb_get_bits(s, 1)) return ESP_ERR_INVALID_STATE;
+    if (gb_get_bits(s, 1)) return ESP_ERR_INVALID_DATA;
     ac_init(s);
 
-    if (build_filter(s) < 0) return ESP_ERR_INVALID_STATE;
+    if (build_filter(s) < 0) return ESP_ERR_INVALID_DATA;
 
     memset(s->status, 0xAA, sizeof(s->status));
     memset(out, 0, s->frame_bytes);

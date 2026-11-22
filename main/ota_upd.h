@@ -49,6 +49,7 @@ esp_err_t ota_upd_start_url(const char *url);
 ota_upd_state_t ota_upd_state(void);
 int             ota_upd_progress(void);      /* 0..100, -1 = неизвестно */
 const char     *ota_upd_msg(void);           /* "" если нет */
+const char     *ota_upd_version(void);      /* версия запущенной прошивки (esp_app_desc) */
 
 /* Подтвердить текущую прошивку после успешного старта (если включён
  * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE): PENDING_VERIFY -> VALID, откат
@@ -59,4 +60,3 @@ esp_err_t ota_upd_confirm_app(void);
 #ifdef __cplusplus
 }
 #endif
-const char *ota_upd_version(void);

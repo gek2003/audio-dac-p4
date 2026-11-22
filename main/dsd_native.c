@@ -74,7 +74,7 @@ esp_err_t dsd_native_start(uint32_t dsd_rate)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 256;
-    err = i2s_new_channel(&chan_cfg, &s_tx1, NULL);
+    err = i2s_new_channel(&chan_cfg, &s_tx1, NULL);   /* API v6.x: (cfg, &tx, &rx) */
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_new_channel(master): %s", esp_err_to_name(err));
         es9039_set_input(ES9039_INPUT_PCM);

@@ -5,7 +5,9 @@
 #  затем idf.py reconfigure — и только потом build.
 # ============================================================================
 
-# --- ESP32-P4: дефолтная ревизия чипа v3.0 ---
+# --- Ревизия чипа (как было в вашем проекте) ---
+# ESP32-P4: дефолтная ревизия чипа v3.0. Если плата на ревизии ниже v3:
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
 CONFIG_ESP32P4_SELECTS_REV_LESS_V3=n
 
 # --- PSRAM: обязательна для буферов дисплея (2 x 720x1280x2 б ~ 3,5 МБ) ---
@@ -48,7 +50,3 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # OTA: откат на предыдущий образ, если новая прошивка не подтверждена
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
-
-# --- Waveshare ESP32-P4 Flash size 32 MB
-CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="32MB"

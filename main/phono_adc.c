@@ -164,7 +164,7 @@ static esp_err_t phono_i2s_init(void)
         (s_clk == PHONO_CLK_SLAVE) ? I2S_ROLE_SLAVE : I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = PHONO_BLOCK_FRAMES;   /* фрейм = 1 стерео-сэмпл */
-    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx);
+    esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &s_rx);   /* API v6.x: (cfg, &tx, &rx) */
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "i2s_new_channel: %s", esp_err_to_name(err));
         return err;

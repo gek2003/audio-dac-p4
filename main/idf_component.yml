@@ -16,11 +16,12 @@
 #                     esp_audio_simple_dec — не рискуем сборкой.
 # ============================================================================
 dependencies:
+  espressif/esp_tinyusb: "^3.0"
   idf: ">=6.0"
 
   espressif/esp_wifi_remote: "*"
-  espressif/esp_hosted: ">=1.6"      # Wi-Fi через ESP32-C6 (esp_wifi_remote по SDIO)
-  espressif/esp_audio_codec: "~2.6"  # MP3/FLAC/WAV декодеры (esp_audio_simple_dec)
+  espressif/esp_hosted: ">=1.6"
+  espressif/esp_audio_codec: "~2.6"
 
   # Графическая оболочка (LVGL 9, горизонтально 1280x720):
   lvgl/lvgl: "^9"
@@ -28,10 +29,6 @@ dependencies:
   espressif/esp_lcd_touch_gt911: "^1"    # тач GT911 (тянет esp_lcd_touch)
   waveshare/esp_lcd_hx8394: "^2.1"       # дисплей HX8394, MIPI-DSI 2 lane
 
-  # USB MSC: SD-карта платы как USB-диск для ПК (USB OTG HS P4).
-  # v3.x: API tinyusb_msc_install_driver/new_storage_sdmmc, требует idf>=5.3
-  espressif/esp_tinyusb: "^3.0"
-  
-    # USB-host флешка (OTG FS P4, GPIO24/25): BOT/SCSI драйвер поверх usb_host.
+  # USB-host флешка (OTG FS P4, GPIO24/25): BOT/SCSI драйвер поверх usb_host.
   # Компонент usb (usb_host) подтянется транзитивно (public-зависимость).
   espressif/usb_host_msc: "^1.3.0"

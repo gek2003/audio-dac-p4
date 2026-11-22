@@ -341,6 +341,10 @@ static esp_err_t parse_dst_container(dsd_ctx_t *ctx, uint64_t chunk_size)
     return ESP_OK;
 }
 
+/* Диагностика DST: сколько фреймов не декодировалось (вместо них —
+ * повтор предыдущего). Лог: первая ошибка и далее каждые 16-ю. */
+static uint32_t s_dst_err_frames = 0;
+
 static esp_err_t dsd_dst_next_frame(dsd_ctx_t *ctx)
 {
     while (1) {
@@ -354,7 +358,11 @@ static esp_err_t dsd_dst_next_frame(dsd_ctx_t *ctx)
             size_t fb_total = (size_t)(ctx->dsd_rate / 75 / 8) * ctx->channels;
             esp_err_t e = dst_decode_frame(ctx->dst_dec, ctx->dst_fbuf, (size_t)sz, ctx->dst_out);
             if (e != ESP_OK) {
-                ESP_LOGW(TAG, "DST фрейм: ошибка 0x%x — повтор предыдущего", e);
+                s_dst_err_frames++;
+                if (s_dst_err_frames == 1 || (s_dst_err_frames % 16) == 0) {
+                    ESP_LOGW(TAG, "DST: повреждённых фреймов %lu — повтор предыдущего",
+                             (unsigned long)s_dst_err_frames);
+                }
                 memcpy(ctx->dst_out, ctx->dst_prev, fb_total);
             } else {
                 memcpy(ctx->dst_prev, ctx->dst_out, fb_total);
