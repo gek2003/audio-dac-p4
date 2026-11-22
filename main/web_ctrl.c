@@ -46,6 +46,7 @@
 #include "stations.h"
 #include "sd_card.h"
 #include "usb_flash.h"
+#include "phono_adc.h"
 #include "ota_upd.h"
 
 static const char *TAG = "web_ctrl";
@@ -145,6 +146,7 @@ static esp_err_t opts_handler(httpd_req_t *req)
 static const char *src_kind(const char *url)
 {
     if (url == NULL || url[0] == '\0' || strcmp(url, "-") == 0) return "none";
+    if (strncmp(url, "adc://", 6) == 0) return "adc";
     if (strncmp(url, "file://", 7) == 0) {
         const char *dot = strrchr(url, '.');
         if (dot && (strncasecmp(dot, ".dsf", 4) == 0 || strncasecmp(dot, ".dff", 4) == 0)) return "dsd";
@@ -198,7 +200,7 @@ static void status_json(char *b, size_t cap)
     snprintf(b, cap,
         "{\"state\":\"%s\",\"kind\":\"%s\",\"src\":\"%s\","
         "\"vol_db\":%.1f,\"vol_pct\":%d,\"mute\":%s,"
-        "\"filter\":%d,\"fir\":%d,\"fs\":%lu,"
+        "\"filter\":%d,\"fir\":%d,\"hpf\":%d,\"fs\":%lu,"
         "\"pos_ms\":%lu,\"total_ms\":%lu,\"seekable\":%s,"
         "\"pl_count\":%d,\"pl_index\":%d,\"stations\":%d,"
         "\"ssid\":\"%s\",\"ip\":\"%s\",\"uptime_s\":%llu,"
@@ -208,6 +210,7 @@ static void status_json(char *b, size_t cap)
         db, pct, (s_hooks.get_mute && s_hooks.get_mute()) ? "true" : "false",
         s_hooks.get_filter ? s_hooks.get_filter() : -1,
         s_hooks.get_fir ? s_hooks.get_fir() : -1,
+        (int)phono_hpf_get(),
         (unsigned long)i2s_out_current_fs(),
         (unsigned long)pos_ms, (unsigned long)total_ms, seekable ? "true" : "false",
         playlist_count(), playlist_index(), stations_count(),
@@ -304,6 +307,44 @@ static esp_err_t api_seek(httpd_req_t *req)
                         ? "{\"err\":\"not supported (MP3/DSD only)\"}"
                     : "{\"err\":\"no data or stopped\"}";
     send_json(req, msg, e == ESP_OK ? 200 : 400);
+    return ESP_OK;
+}
+
+/* ------------------------- Phono (ADC) вход ------------------------------- */
+
+static esp_err_t api_phono(httpd_req_t *req)
+{
+    (void)req;
+    if (phono_adc_running()) {
+        send_json(req, "{\"ok\":true,\"note\":\"already running\"}", 200);
+        return ESP_OK;
+    }
+    if (s_hooks.set_source_url) {
+        s_hooks.set_source_url("adc://");
+    } else {
+        if (decoder_running()) decoder_stop();
+        decoder_start("adc://", DEC_TYPE_AUTO, false);
+    }
+    send_json(req, "{\"ok\":true}", 200);
+    return ESP_OK;
+}
+
+static esp_err_t api_hpf(httpd_req_t *req)
+{
+    char val[16];
+    if (get_query(req, "v", val, sizeof(val)) <= 0) {
+        send_json(req, "{\"err\":\"need v=0|1|2\"}", 400);
+        return ESP_OK;
+    }
+    int v = atoi(val);
+    if (v < 0 || v > 2) {
+        send_json(req, "{\"err\":\"range 0..2\"}", 400);
+        return ESP_OK;
+    }
+    phono_hpf_set((hpf_mode_t)v);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "{\"hpf\":%d}", v);
+    send_json(req, buf, 200);
     return ESP_OK;
 }
 
@@ -618,9 +659,15 @@ static const char PAGE_HTML[] =
 "<div class='row'>"
 "<input type='text' id='url' placeholder='http://... radio or file'>"
 "<button onclick=\"playUrl()\">GO</button></div>"
-"<div class='lbl'>SD / USB files</div>"
+"<div class='lbl'>SD / USB / Phono</div>"
 "<div class='row'><button id='btsd' onclick='setRoot(\"sd\")'>SD</button>"
-"<button id='btusb' onclick='setRoot(\"usb\")'>USB</button></div><ul id='fl'></ul>"
+"<button id='btusb' onclick='setRoot(\"usb\")'>USB</button>"
+"<button onclick=\"api('/api/phono').then(tick)\">PHONO</button></div><ul id='fl'></ul>"
+"<div class='lbl'>Phono subsonic HPF</div>"
+"<div class='row'>"
+"<button id='hp0' onclick=\"api('/api/hpf?v=0').then(tick)\">OFF</button>"
+"<button id='hp1' onclick=\"api('/api/hpf?v=1').then(tick)\">GENTLE</button>"
+"<button id='hp2' onclick=\"api('/api/hpf?v=2').then(tick)\">STRICT</button></div>"
 "<div class='lbl'>Radio stations</div><ul id='stl'></ul>"
 "<div class='lbl'>Firmware</div>"
 "<div class='row'>"
@@ -654,7 +701,11 @@ static const char PAGE_HTML[] =
 "$('pp').innerHTML=j.state=='playing'?'II':'&gt;';"
 "if(!scrubbing){$('vl').value=j.vol_pct;"
 "$('fill').style.width=(j.total_ms?100*j.pos_ms/j.total_ms:0)+'%';"
-"$('tm').textContent=j.total_ms?tm(j.pos_ms)+' / '+tm(j.total_ms):''}"
+"$('tm').textContent=j.total_ms?tm(j.pos_ms)+' / '+tm(j.total_ms):'';"
+"const hpf=(typeof j.hpf==='number')?j.hpf:1;"
+"$('hp0').style.background=hpf==0?'#4a7ba6':'#3a4148';"
+"$('hp1').style.background=hpf==1?'#4a7ba6':'#3a4148';"
+"$('hp2').style.background=hpf==2?'#4a7ba6':'#3a4148';}"
 "})}"
 "setInterval(tick,2000);tick();"
 "let curRoot='sd';"
@@ -751,6 +802,8 @@ esp_err_t web_ctrl_start(const ui_hooks_t *hooks)
         { .uri = "/api/next",     .method = HTTP_POST,    .handler = api_next      },
         { .uri = "/api/prev",     .method = HTTP_POST,    .handler = api_prev      },
         { .uri = "/api/seek",     .method = HTTP_POST,    .handler = api_seek      },
+        { .uri = "/api/phono",    .method = HTTP_POST,    .handler = api_phono     },
+        { .uri = "/api/hpf",      .method = HTTP_POST,    .handler = api_hpf       },
         { .uri = "/api/src",      .method = HTTP_POST,    .handler = api_src       },
         { .uri = "/api/files",    .method = HTTP_GET,     .handler = api_files     },
         { .uri = "/api/playfile", .method = HTTP_POST,    .handler = api_playfile  },

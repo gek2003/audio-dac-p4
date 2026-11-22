@@ -47,6 +47,7 @@
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 #include "dsd_dec.h"
+#include "phono_adc.h"
 #include "meta.h"
 #include "es9039q2m_esp32p4_driver.h"
 #include "freertos/FreeRTOS.h"
@@ -227,6 +228,36 @@ static size_t convert_to_32bit(const uint8_t *src, size_t src_len, uint8_t bits,
     return out_used;
 }
 
+/* ------------------- ADC passthrough (adc://) ------------------------------
+ * Живой вход: phono_adc.c пишет в ringbuf готовые 32-битные стерео-фреймы
+ * (24 бита в старших разрядах, 192 кГц), decoder льёт их без изменений в
+ * i2s_out_write. Декодирование/метаданные/перемотка не применяются.
+ * Остановка: только decoder_stop() (s_dec.stop_requested) либо авария
+ * phono_adc — тогда «конец источника» даст авто-восстановление из main.c. */
+static void adc_playback_loop(void)
+{
+    apply_rate_with_dac(192000);   /* BCLK/LRCK 192к на DAC (mute->unmute внутри) */
+
+    while (!s_dec.stop_requested) {
+        size_t chunk = 0;
+        uint8_t *data = (uint8_t *)xRingbufferReceiveUpTo(s_dec.ring, &chunk,
+                                                          pdMS_TO_TICKS(500),
+                                                          DEC_READ_CHUNK);
+        if (data == NULL) {
+            if (!phono_adc_running()) {
+                ESP_LOGW(TAG, "ADC-источник остановился");
+                break;
+            }
+            continue;
+        }
+        if (chunk > 0) {
+            i2s_out_write(data, chunk);
+            s_dec.samples += chunk / (2 * sizeof(int32_t));
+        }
+        vRingbufferReturnItem(s_dec.ring, (void *)data);
+    }
+}
+
 /* ------------------------- Задача декодера -------------------------------- */
 
 /* ------------------------- DSD-файлы (DoP) -------------------------------- */
@@ -284,6 +315,12 @@ static void dsd_playback_loop(void)
 static void decoder_task(void *arg)
 {
     (void)arg;
+
+    /* ADC-вход (adc://): passthrough без esp_audio_codec и метаданных */
+    if (strncmp(s_dec.url, "adc://", 6) == 0) {
+        adc_playback_loop();
+        goto cleanup;
+    }
 
     /* DSD-файлы (.dsf/.dff): свой пайплайн, без esp_audio_codec и без ringbuf */
     if (strncmp(s_dec.url, "file://", 7) == 0 && dsd_is_dsd_path(s_dec.url)) {
@@ -457,7 +494,8 @@ cleanup:
     s_dec.task = NULL;
     ESP_LOGI(TAG, "Задача декодера завершена");
     /* конец трека: авто-переход (колбэк ставит main.c до старта декодера) */
-    if (s_on_finish_cb != NULL && !s_dec.stop_requested) {
+    if (s_on_finish_cb != NULL && !s_dec.stop_requested
+        && strncmp(s_dec.url, "adc://", 6) != 0) {
         s_on_finish_cb();
     }
     vTaskDelete(NULL);
@@ -483,6 +521,8 @@ esp_err_t decoder_start(const char *url, decoder_type_t type, bool is_stream_hin
 
     /* DSD-файлы (.dsf/.dff): источник не нужен — dsd_dec.c читает файл сам */
     bool is_dsd_file = (strncmp(url, "file://", 7) == 0) && dsd_is_dsd_path(url);
+    /* ADC-вход (adc://): источник — задача phono_adc.c (I²S RX + DSP) */
+    bool is_adc = (strncmp(url, "adc://", 6) == 0);
 
     if (!is_dsd_file) {
         s_dec.ring = xRingbufferCreateWithCaps(DEC_RING_SIZE, RINGBUF_TYPE_BYTEBUF,
@@ -494,12 +534,22 @@ esp_err_t decoder_start(const char *url, decoder_type_t type, bool is_stream_hin
             return ESP_ERR_NO_MEM;
         }
 
-        /* запускаем HTTP-читатель в этот же ringbuf */
-        esp_err_t err = http_source_start(url, s_dec.ring, NULL, NULL);
-        if (err != ESP_OK) {
-            vRingbufferDelete(s_dec.ring);
-            s_dec.ring = NULL;
-            return err;
+        if (is_adc) {
+            /* запускаем приём с АЦП в этот же ringbuf */
+            esp_err_t aerr = phono_adc_start(s_dec.ring);
+            if (aerr != ESP_OK) {
+                vRingbufferDelete(s_dec.ring);
+                s_dec.ring = NULL;
+                return aerr;
+            }
+        } else {
+            /* запускаем HTTP-читатель в этот же ringbuf */
+            esp_err_t err = http_source_start(url, s_dec.ring, NULL, NULL);
+            if (err != ESP_OK) {
+                vRingbufferDelete(s_dec.ring);
+                s_dec.ring = NULL;
+                return err;
+            }
         }
     }
 
@@ -514,7 +564,7 @@ esp_err_t decoder_start(const char *url, decoder_type_t type, bool is_stream_hin
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "Воспроизведение: %s (%s%s)", url, is_stream_hint ? "поток" : "файл",
-             is_dsd_file ? ", DoP" : "");
+             is_dsd_file ? ", DoP" : (is_adc ? ", ADC" : ""));
     return ESP_OK;
 }
 
@@ -523,6 +573,7 @@ void decoder_stop(void)
     s_dec.stop_requested = true;
     s_dec.paused = false;
     i2s_out_set_paused(false);
+    phono_adc_stop();      /* ADC-источник: глушим задачу ДО удаления ringbuf */
     http_source_stop();
     int waited = 0;
     while (s_dec.task != NULL && waited < DEC_STOP_DRAIN_MS) {
@@ -608,6 +659,15 @@ void decoder_progress_ext(uint32_t *pos_ms, uint32_t *total_ms, bool *seekable)
     if (seekable) *seekable = false;
     if (!decoder_running()) return;
 
+    /* ADC: живой поток — позиция по сэмплам, длительности нет, не перематывается */
+    if (strncmp(s_dec.url, "adc://", 6) == 0) {
+        if (s_dec.current_fs > 0 && s_dec.samples > 0) {
+            if (pos_ms) *pos_ms = (uint32_t)((s_dec.samples * 1000ULL) / s_dec.current_fs);
+        }
+        if (seekable) *seekable = false;
+        return;
+    }
+
     if (s_dec.dsd != NULL) {
         uint64_t pos = 0, total = 0;
         dsd_get_progress(s_dec.dsd, &pos, &total);
@@ -658,6 +718,10 @@ void decoder_progress_ext(uint32_t *pos_ms, uint32_t *total_ms, bool *seekable)
 esp_err_t decoder_seek(uint32_t ms)
 {
     if (!decoder_running()) return ESP_ERR_INVALID_STATE;
+    if (strncmp(s_dec.url, "adc://", 6) == 0) {
+        ESP_LOGW(TAG, "перемотка ADC-входа невозможна (живой поток)");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (s_dec.dsd != NULL) {
         return dsd_seek_ms(s_dec.dsd, ms);      /* точный seek в живом декодере */
     }
@@ -665,7 +729,7 @@ esp_err_t decoder_seek(uint32_t ms)
         ESP_LOGW(TAG, "перемотка радио невозможна");
         return ESP_ERR_NOT_SUPPORTED;
     }
-    esp_audio_simple_dec_type_t eff = detect_type(s_dec.url, s_dec.type_override);
+    decoder_type_t eff = detect_type(s_dec.url, s_dec.type_override);
     if (eff != ESP_AUDIO_SIMPLE_DEC_TYPE_MP3) {
         /* FLAC/WAV: рестарт с середины требует заголовок — пока не поддержано
          * (TODO: проверить mid-stream sync на железе; для FLAC добавить seektable). */
@@ -692,6 +756,7 @@ esp_err_t decoder_seek(uint32_t ms)
     if (ftotal > 0 && offset >= ftotal) {
         offset = (ftotal > 1024) ? ftotal - 1024 : 0;
     }
+    if (offset < 0) offset = 0;
 
     bool was_paused = s_dec.paused;
     char url[512];
