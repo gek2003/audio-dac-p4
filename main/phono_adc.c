@@ -27,6 +27,7 @@
 #include "driver/i2s_std.h"
 
 #include "phono_adc.h"
+#include "audio_pipeline.h"  /* P4d/C19: decoder_paused() */
 
 static const char *TAG = "phono";
 
@@ -103,6 +104,17 @@ static void phono_rx_task(void *arg)
 
     uint32_t stat_t = 0;
     while (!s_stop_req) {
+        /* P4d/C19: decoder на паузе — читаем и выбрасываем блок из DMA,
+         * DSP не гоняем, в ringbuf не пишем (иначе «блок потерян» при
+         * забитом буфере). Приём I²S не останавливаем: WM8782 — мастер,
+         * тактирование не трогаем. */
+        if (decoder_paused()) {
+            size_t skipped = 0;
+            (void)i2s_channel_read(s_rx, in_buf, sizeof(in_buf), &skipped,
+                                   pdMS_TO_TICKS(200));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
         size_t bytes = 0;
         /* таймаут 200 мс: задача регулярно просыпается и проверяет stop_req */
         if (i2s_channel_read(s_rx, in_buf, sizeof(in_buf), &bytes,
@@ -138,7 +150,10 @@ static void phono_rx_task(void *arg)
         /* Живой поток: decoder подтягивает. Если decoder на паузе — ringbuf
          * полон: блокируемся до 1000 мс (на выходе тишина; DMA RX переполнится,
          * WM8782-мастер продолжит — после снятия паузы звук вернётся без рывка,
-         * только с пропуском недослушанного) */
+         * только с пропуском недослушанного). P4d/C19: перепроверка паузы
+         * прямо перед отправкой — защита на гонку между проверкой в начале
+         * цикла и отправкой (иначе блокировка до 1000 мс и «блок потерян»). */
+        if (decoder_paused()) continue;
         size_t wb = 2 * (size_t)frames * sizeof(int32_t);
         if (xRingbufferSend(s_ring, out_buf, wb, pdMS_TO_TICKS(1000)) != pdTRUE) {
             ESP_LOGW(TAG, "ringbuf занят — блок потерян (%u байт)", (unsigned)wb);

@@ -87,7 +87,7 @@ int phono_run_all_tests(void) {
     printf("--- DC blocker ---\n");
     { phono_ch_t c; phono_ch_init(&c, 1.0f, HPF_GENTLE);
       for (int i = 0; i < NS; i++) {
-          hpf_engine_poll(&c.hpff);
+          hpf_engine_poll(&c.hpf);
           float y = phono_process(&c, 0.001f);
           if (i >= NS - 96000 && (fabsf(y) > 0.00316f)) {          // -50 dBFS window
               printf("DC FAIL: tail %.2e FS\n", fabsf(y)); n_fail++; break;
@@ -102,7 +102,7 @@ int phono_run_all_tests(void) {
           float x = 0.95f * sinf(2.0f * 3.14159265358979f * 1000.0f * i / 192000.0f);
           if (i == NS / 2) x = 1.0f;                                // full-scale step
           x += 1e-6f * sinf(2.0f * 3.14159265358979f * 7000.0f * i / 192000.0f);
-          hpf_engine_poll(&c.hpff);
+          hpf_engine_poll(&c.hpf);
           float y = phono_process(&c, x);
           if (isnan(y) || isinf(y)) { bad = 1.0f; break; }
       }
@@ -114,9 +114,9 @@ int phono_run_all_tests(void) {
       float max_jump = 0.0f, prev = 0.0f;
       osc_t o = { 2.0f * 3.14159265358979f * 10.0f / 192000.0f, 0.0f };
       for (int i = 0; i < 480000; i++) {
-          hpf_engine_poll(&c.hpff);
+          hpf_engine_poll(&c.hpf);
           float y = phono_process(&c, osc_step(&o) * 0.3f);
-          if (i == 240000) phono_request_hpf(&c.hpff, HPF_STRICT);  // switch mid-stream
+          if (i == 240000) phono_request_hpf(&c.hpf, HPF_STRICT);  // switch mid-stream
           if (i > 240000 && i < 240000 + HPF_XFADE_N) {
               float j = fabsf(y - prev);
               if (j > max_jump) max_jump = j;
@@ -134,3 +134,4 @@ int phono_run_all_tests(void) {
 #ifdef HOST_TEST
 int main(void) { return phono_run_all_tests(); }
 #endif
+

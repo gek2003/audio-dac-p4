@@ -197,10 +197,10 @@ static void usb_lib_task(void *arg)
         uint32_t event_flags = 0;
         (void)usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-        (void)usb_host_device_free_all();
+            (void)usb_host_device_free_all();  /* P4d: выравнивание скобок, поведение прежнее */
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-        // все устройства освобождены — можно продолжать ждать подключения
+            // все устройства освобождены — можно продолжать ждать подключения
         }
     }
 }

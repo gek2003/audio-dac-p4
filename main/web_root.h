@@ -44,56 +44,58 @@
     "ss='dim'></div><script>let scrubbing=false,stations=[],curPath='',curOff=0;c" \
     "onst $=id=>document.getElementById(id);$('vl').addEventListener('input',()=>" \
     "{scrubbing=true});$('vl').addEventListener('change',()=>{scrubbing=false;tic" \
-    "k()});function api(u){return fetch(u,{method:'POST'}).then(r=>r.json())}func" \
-    "tion esc(s){return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'" \
-    "&lt;')}function tm(ms){const s=Math.floor(ms/1000);const m=Math.floor(s/60)%" \
-    "60,sec=s%60,h=Math.floor(s/3600);return (h?h+':':'')+Math.floor(s/60)+':'+St" \
-    "ring(sec).padStart(2,'0')}function volrel(d){const v=$('vl');api('/api/volum" \
-    "e?v='+Math.max(0,Math.min(100,+v.value+d))).then(tick)}function playUrl(){co" \
-    "nst u=$('url').value.trim();if(!u)return;api('/api/src?u='+encodeURIComponen" \
-    "t(u)).then(tick)}$('vl').addEventListener('change',()=>api('/api/volume?v='+" \
-    "$('vl').value))$('bar').addEventListener('click',e=>{const r=$('bar').getBou" \
-    "ndingClientRect();fetch('/api/status').then(r=>r.json()).then(j=>{if(!j.seek" \
-    "able||!j.total_ms)return;const k=(e.clientX-r.left)/r.width;api('/api/seek?m" \
-    "s='+Math.floor(k*j.total_ms)).then(tick)})})function tick(){fetch('/api/stat" \
-    "us').then(r=>r.json()).then(j=>{const st=j.state=='playing'?'PLAYING':j.stat" \
-    "e=='paused'?'PAUSED':'STOPPED';$('st').textContent=st+' | '+j.ip+' | '+j.ssi" \
-    "d+' | '+j.vol_db+' dB'+(j.mute?' [MUTE]':'')+' | fs='+(j.fs||'-');$('pp').in" \
-    "nerHTML=j.state=='playing'?'II':'&gt;';if(!scrubbing){$('vl').value=j.vol_pc" \
-    "t;$('fill').style.width=(j.total_ms?100*j.pos_ms/j.total_ms:0)+'%';$('tm').t" \
-    "extContent=j.total_ms?tm(j.pos_ms)+' / '+tm(j.total_ms):'';const hpf=(typeof" \
-    " j.hpf==='number')?j.hpf:1;$('hp0').style.background=hpf==0?'#4a7ba6':'#3a41" \
-    "48';$('hp1').style.background=hpf==1?'#4a7ba6':'#3a4148';$('hp2').style.back" \
-    "ground=hpf==2?'#4a7ba6':'#3a4148';const dsdm=(typeof j.dsd==='number')?j.dsd" \
-    ":0;$('dsd0').style.background=dsdm==0?'#4a7ba6':'#3a4148';$('dsd1').style.ba" \
-    "ckground=dsdm==1?'#4a7ba6':'#3a4148';}})}setInterval(tick,2000);tick();let c" \
-    "urRoot='sd';function setRoot(r){curRoot=r;$('btsd').style.background=r=='sd'" \
-    "?'#4a7ba6':'#3a4148';$('btusb').style.background=r=='usb'?'#4a7ba6':'#3a4148" \
-    "';loadFiles('',0,false)}function loadFiles(p,off,append){curPath=p;curOff=of" \
-    "f;fetch('/api/files?root='+curRoot+(p?'&path='+encodeURIComponent(p):'')+'&o" \
-    "ff='+off+'&lim=100').then(r=>r.json()).then(j=>{const el=$('fl');if(!append)" \
-    "{el.innerHTML='';}if(j.err){el.innerHTML=\"<li class='dim'>\"+j.err+'</li>';" \
-    "return}if(!append&&p){const li=document.createElement('li');li.textContent='" \
-    ".. (up)';li.onclick=()=>{const i=p.lastIndexOf('/');loadFiles(i>0?p.slice(0," \
-    "i):'',0,false)};el.appendChild(li)}if(!j.items||!j.items.length){if(!append)" \
-    "el.innerHTML+=\"<li class='dim'>empty</li>\";return}j.items.forEach(it=>{con" \
-    "st li=document.createElement('li');li.textContent=(it.dir?'[DIR] ':'')+it.na" \
-    "me;const full=p?(p.endsWith('/')?p:p+'/'+it.name):it.name;li.onclick=()=>it." \
-    "dir?loadFiles(full,0,false):api('/api/playfile?p='+encodeURIComponent(full)+" \
-    "'&root='+curRoot).then(()=>{});el.appendChild(li)})const got=off+j.items.len" \
-    "gth;if(j.count>got){const li=document.createElement('li');li.className='dim'" \
-    ";li.textContent='... ещё '+(j.count-got);li.onclick=()=>loadFiles(curPath,go" \
-    "t,true);el.appendChild(li)}})}setRoot('sd');function loadStations(){fetch('/" \
-    "api/stations').then(r=>r.json()).then(j=>{stations=j.items||[];const el=$('s" \
-    "tl');el.innerHTML='';if(!stations.length){el.innerHTML=\"<li class='dim'>emp" \
-    "ty</li>\";return}stations.forEach((it,idx)=>{const li=document.createElement" \
-    "('li');li.textContent=it.name;li.onclick=()=>fetch('/api/station?i='+idx,{me" \
-    "thod:'POST'}).then(tick);el.appendChild(li)})})}loadStations();function otaF" \
-    "romUrl(){const u=$('otaurl').value.trim();if(!u)return;api('/api/ota?u='+enc" \
-    "odeURIComponent(u)).then(j=>{$('otast').textContent=j.err?j.err+' '+j.msg:'s" \
-    "tarted';tick()})}function otaFromSd(){api('/api/ota?file=firmware.bin').then" \
-    "(j=>{$('otast').textContent=j.err?j.err+' '+j.msg:'started (firmware.bin)';t" \
-    "ick()})}function otaTick(){fetch('/api/status').then(r=>r.json()).then(j=>{c" \
-    "onst o=j.ota||{};$('otast').textContent=o.state=='idle'?'':(o.state+' '+(o.p" \
-    "ct>=0?o.pct+'% ':'')+(o.msg||''))});}setInterval(otaTick,2000);otaTick();</s" \
-    "cript></body></html>"
+    "k()});let busy=false,lastApi=0;function api(u){if(busy||Date.now()-lastApi<3" \
+    "00)return Promise.resolve({err:'busy'});busy=true;lastApi=Date.now();return " \
+    "fetch(u,{method:'POST'}).then(r=>r.json()).finally(()=>{busy=false})}functio" \
+    "n esc(s){return s==null?'':String(s).replace(/&/g,'&amp;').replace(/</g,'&lt" \
+    ";')}function tm(ms){const s=Math.floor(ms/1000);const m=Math.floor(s/60)%60," \
+    "sec=s%60,h=Math.floor(s/3600);return (h?h+':':'')+Math.floor(s/60)+':'+Strin" \
+    "g(sec).padStart(2,'0')}function volrel(d){const v=$('vl');api('/api/volume?v" \
+    "='+Math.max(0,Math.min(100,+v.value+d))).then(tick)}function playUrl(){const" \
+    " u=$('url').value.trim();if(!u)return;api('/api/src?u='+encodeURIComponent(u" \
+    ")).then(tick)}$('vl').addEventListener('change',()=>api('/api/volume?v='+$('" \
+    "vl').value));$('bar').addEventListener('click',e=>{const r=$('bar').getBound" \
+    "ingClientRect();fetch('/api/status').then(r=>r.json()).then(j=>{if(!j.seekab" \
+    "le||!j.total_ms)return;const k=(e.clientX-r.left)/r.width;api('/api/seek?ms=" \
+    "'+Math.floor(k*j.total_ms)).then(tick)})})function tick(){fetch('/api/status" \
+    "').then(r=>r.json()).then(j=>{const st=j.state=='playing'?'PLAYING':j.state=" \
+    "='paused'?'PAUSED':'STOPPED';$('st').textContent=st+' | '+j.ip+' | '+j.ssid+" \
+    "' | '+j.vol_db+' dB'+(j.mute?' [MUTE]':'')+' | fs='+(j.fs||'-');$('pp').inne" \
+    "rHTML=j.state=='playing'?'II':'&gt;';if(!scrubbing){$('vl').value=j.vol_pct;" \
+    "$('fill').style.width=(j.total_ms?100*j.pos_ms/j.total_ms:0)+'%';$('tm').tex" \
+    "tContent=j.total_ms?tm(j.pos_ms)+' / '+tm(j.total_ms):'';const hpf=(typeof j" \
+    ".hpf==='number')?j.hpf:1;$('hp0').style.background=hpf==0?'#4a7ba6':'#3a4148" \
+    "';$('hp1').style.background=hpf==1?'#4a7ba6':'#3a4148';$('hp2').style.backgr" \
+    "ound=hpf==2?'#4a7ba6':'#3a4148';const dsdm=(typeof j.dsd==='number')?j.dsd:0" \
+    ";$('dsd0').style.background=dsdm==0?'#4a7ba6':'#3a4148';$('dsd1').style.back" \
+    "ground=dsdm==1?'#4a7ba6':'#3a4148';}})}setInterval(tick,2000);tick();let cur" \
+    "Root='sd';function setRoot(r){curRoot=r;$('btsd').style.background=r=='sd'?'" \
+    "#4a7ba6':'#3a4148';$('btusb').style.background=r=='usb'?'#4a7ba6':'#3a4148';" \
+    "loadFiles('',0,false)}function loadFiles(p,off,append){curPath=p;curOff=off;" \
+    "fetch('/api/files?root='+curRoot+(p?'&path='+encodeURIComponent(p):'')+'&off" \
+    "='+off+'&lim=100').then(r=>r.json()).then(j=>{const el=$('fl');if(!append){e" \
+    "l.innerHTML='';}if(j.err){el.innerHTML=\"<li class='dim'>\"+j.err+'</li>';re" \
+    "turn}if(!append&&p){const li=document.createElement('li');li.textContent='.." \
+    " (up)';li.onclick=()=>{const i=p.lastIndexOf('/');loadFiles(i>0?p.slice(0,i)" \
+    ":'',0,false)};el.appendChild(li)}if(!j.items||!j.items.length){if(!append)el" \
+    ".innerHTML+=\"<li class='dim'>empty</li>\";return}j.items.forEach(it=>{const" \
+    " li=document.createElement('li');li.textContent=(it.dir?'[DIR] ':'')+it.name" \
+    ";const full=p?(p.endsWith('/')?p:p+'/'+it.name):it.name;li.onclick=()=>it.di" \
+    "r?loadFiles(full,0,false):api('/api/playfile?p='+encodeURIComponent(full)+'&" \
+    "root='+curRoot).then(()=>{});el.appendChild(li)})const got=off+j.items.lengt" \
+    "h;if(j.count>got){const li=document.createElement('li');li.className='dim';l" \
+    "i.textContent='... ещё '+(j.count-got);li.onclick=()=>loadFiles(curPath,got," \
+    "true);el.appendChild(li)}})}setRoot('sd');function loadStations(){fetch('/ap" \
+    "i/stations').then(r=>r.json()).then(j=>{stations=j.items||[];const el=$('stl" \
+    "');el.innerHTML='';if(!stations.length){el.innerHTML=\"<li class='dim'>empty" \
+    "</li>\";return}stations.forEach((it,idx)=>{const li=document.createElement('" \
+    "li');li.textContent=it.name;li.onclick=()=>fetch('/api/station?i='+idx,{meth" \
+    "od:'POST'}).then(tick);el.appendChild(li)})})}loadStations();function otaFro" \
+    "mUrl(){const u=$('otaurl').value.trim();if(!u)return;api('/api/ota?u='+encod" \
+    "eURIComponent(u)).then(j=>{$('otast').textContent=j.err?j.err+' '+j.msg:'sta" \
+    "rted';tick()})}function otaFromSd(){api('/api/ota?file=firmware.bin').then(j" \
+    "=>{$('otast').textContent=j.err?j.err+' '+j.msg:'started (firmware.bin)';tic" \
+    "k()})}function otaTick(){fetch('/api/status').then(r=>r.json()).then(j=>{con" \
+    "st o=j.ota||{};$('otast').textContent=o.state=='idle'?'':(o.state+' '+(o.pct" \
+    ">=0?o.pct+'% ':'')+(o.msg||''))});}setInterval(otaTick,2000);otaTick();</scr" \
+    "ipt></body></html>"

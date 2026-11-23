@@ -304,7 +304,22 @@ static void dsd_fade_up(void)
     s_fade_level_db = 0.0f;
 }
 
-/* ------------------- ADC passthrough (adc://) ------------------------------
+/* P4d/D20: затухание до пола БЕЗ отмены по stop_requested — конец трека
+ * и есть случай «затухать». Mute не накладывает: громкость вернёт
+ * dsd_fade_restore() после смены входа на PCM. */
+static void dsd_fade_to_floor(void)
+{
+    float from = (s_fade_level_db != 0.0f) ? s_fade_level_db : audio_user_volume_db();
+    for (int step = 1; step <= DSD_FADE_STEPS; step++) {
+        float db = from + (DSD_FADE_FLOOR_DB - from) * step / DSD_FADE_STEPS;
+        (void)es9039_set_volume_db(db);
+        s_fade_level_db = db;
+        vTaskDelay(pdMS_TO_TICKS(DSD_FADE_STEP_MS));
+    }
+    /* s_fade_level_db остаётся на полу — restore вернёт громкость. */
+}
+
+/* ------------------- ADC passthrough (adc://) -----------------------------
  * Живой вход: phono_adc.c пишет в ringbuf готовые 32-битные стерео-фреймы
  * (24 бита в старших разрядах, 192 кГц), decoder льёт их без изменений в
  * i2s_out_write. Декодирование/метаданные/перемотка не применяются.
@@ -417,6 +432,8 @@ static void dsd_playback_loop(void)
      * Lock при DoP может не подняться так же, как при PCM (детекция иная),
      * поэтому после переключения частоты принудительно снимаем mute —
      * иначе поток замучен навсегда. */
+    /* P4d/D20: смена Reg 1/57 на приглушённом DAC — затухание до пола. */
+    dsd_fade_to_floor();
     es9039_set_input(ES9039_INPUT_DOP);
     apply_rate_with_dac(info.dop_fs);
     es9039_mute(false);
@@ -425,6 +442,7 @@ static void dsd_playback_loop(void)
              (unsigned long)info.dop_fs);
 
     bool dop_paused = false;
+    bool first_block = true;   /* P4d/D20: разгон после первого записанного блока */
     while (!s_dec.stop_requested) {
         if (s_dec.paused != dop_paused) {
             if (s_dec.paused) {
@@ -446,14 +464,21 @@ static void dsd_playback_loop(void)
                                 s_dec.out_buf_size / 4, &eof);
         if (n == 0) break;
         i2s_out_write(s_dec.out_buf, n * sizeof(int32_t));
+        if (first_block) { first_block = false; dsd_fade_up(); }  /* P4d/D20 */
         if (eof) break;
     }
+    /* P4d/D20: конец трека/стоп — затухание, а не клик. Из паузы не
+     * выходим: пол и mute уже наложены fade-механикой. */
+    if (!s_fade_muted) dsd_fade_to_floor();
     dsd_fade_restore();   /* страховка: вышли в паузе — вернуть DAC в строй */
     dsd_close(dsd);
     s_dec.dsd = NULL;
 
-    /* вернём DAC на PCM-вход — иначе следующий PCM-файл не воспроизведётся */
+    /* вернём DAC на PCM-вход — иначе следующий PCM-файл не воспроизведётся.
+     * P4d/D20: смена входа идёт на приглушённом DAC — restore ПОСЛЕ
+     * возврата на PCM, иначе unmute щёлкнул бы на DoP-хвосте. */
     es9039_set_input(ES9039_INPUT_PCM);
+    dsd_fade_restore();
     ESP_LOGI(TAG, "DSD-воспроизведение завершено, DAC вернулся в PCM");
 }
 

@@ -1,0 +1,10 @@
+menu "Phono DSP self-test"
+
+    config PHONO_DSP_TEST
+        bool "Compile phono DSP bench tests into firmware (phono_dsp_test.c)"
+        default y
+        help
+            Бенч-тесты pipeline_192k.h в прошивке (P4d/P2-13). Для релиза
+            можно выключить — минус ~7 КБ кода.
+
+endmenu

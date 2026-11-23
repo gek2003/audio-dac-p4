@@ -19,6 +19,14 @@
 # UI: ui.c (LVGL, EN/RU) + ui_display.c (HX8394/MIPI-DSI) + ui_touch.c (GT911).
 # ============================================================================
 
+# P4d/P2-13: bench-тесты DSP (phono_dsp_test.c) собираются по флагу
+# CONFIG_PHONO_DSP_TEST (main/Kconfig.projbuild, дефолт y — поведение прежнее;
+# выключение убирает ~7 КБ из прошивки). Вызовов phono_run_all_tests() в коде нет.
+set(PHONO_TEST_SRC "")
+if(CONFIG_PHONO_DSP_TEST)
+    list(APPEND PHONO_TEST_SRC "phono_dsp_test.c")
+endif()
+
 idf_component_register(
     SRCS
         "es9039q2m_esp32p4_driver.c"
@@ -35,7 +43,7 @@ idf_component_register(
         "dsd_dec.c"
         "usb_msc.c"
         "phono_adc.c"
-        "phono_dsp_test.c"
+        ${PHONO_TEST_SRC}
         "dst_dec.c"
         "dsd_native.c"
         "web_ctrl.c"          # веб-пульт: HTTP-сервер порт 80

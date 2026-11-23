@@ -50,3 +50,6 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # OTA: откат на предыдущий образ, если новая прошивка не подтверждена
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# P4d/P2-13: bench-тесты фоно-DSP в прошивке (минус ~7 КБ, если выключить)
+CONFIG_PHONO_DSP_TEST=y
