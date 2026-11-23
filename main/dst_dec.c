@@ -95,7 +95,9 @@ static int gb_get_bits_left(dst_handle_t s) {
 /* get_ur_golomb_jpegls — сверено с ffmpeg libavcodec/golomb.h (LGPL-2.1+),
  * не-cached ветка: значение = (i << k) + bits, где i = число считанных нулей
  * (unary), bits — следующие k бит. limit = биты до конца потока (esc_len = 0,
- * как вызывает DST-декодер). Возврат -1 на ошибке/обрыве потока. */
+ * как вызывает DST-декодер). Возврат -1 на ошибке/обрыве потока. Знаковый
+ * бит читается отдельно в get_sr_golomb_dst (только при v != 0). P4c-2/P1-4:
+ * сверено с ffmpeg libavcodec/dstdec.c бит-в-бит. */
 static int get_ur_golomb_jpegls(dst_handle_t s, int k) {
     int i;
     int limit = gb_get_bits_left(s);
@@ -232,8 +234,9 @@ static inline void ac_get(dst_handle_t s, int p, int *e) {
     if (s->ac.a < 2048) {
         int n = 11 - (int)av_log2_(s->ac.a);
         s->ac.a <<= n;
-        uint32_t new_bits = (uint32_t)gb_get_bits(s, n);
-        if (new_bits == 0xFFFFFFFFu && n > 0) new_bits = 0;   /* EOF: данные кончились */
+        int nb = gb_get_bits(s, n);
+        if (nb < 0) nb = 0;   /* P4c-2/P1-5: EOF — добор нулями за концом потока, как в ffmpeg */
+        uint32_t new_bits = (uint32_t)nb;
         s->ac.c = (s->ac.c << n) | new_bits;
     }
 }

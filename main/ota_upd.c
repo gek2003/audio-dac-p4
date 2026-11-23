@@ -28,6 +28,8 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "nvs.h"
+#include "nvs_flash.h"
 #include <stdarg.h>
 
 #include "esp_log.h"
@@ -75,11 +77,38 @@ esp_err_t ota_upd_confirm_app(void)
     if (esp_ota_get_state_partition(running, &st) != ESP_OK) {
         return ESP_ERR_NOT_SUPPORTED;   /* otadata отсутствует/не OTA-раздел */
     }
+    /* P4c-3/P1-6: диагностика отката. Флаг ставится на время загрузки; если
+     * в следующем запуске образ уже VALID, а флаг остался — прошивка не
+     * подтвердилась, загрузчик откатился на предыдущую. */
+    nvs_handle_t nh = 0;
+    bool rolled = false;
+    if (nvs_open("ota_upd", NVS_READWRITE, &nh) == ESP_OK) {
+        uint8_t fb = 0;
+        if (nvs_get_u8(nh, "first_boot", &fb) == ESP_OK && fb == 1) {
+            rolled = true;
+        }
+        nvs_set_u8(nh, "first_boot", 1);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
     if (st != ESP_OTA_IMG_PENDING_VERIFY) {
+        if (rolled) {
+            ESP_LOGW(TAG, "OTA: обнаружен откат на предыдущий образ");
+        }
+        if (nvs_open("ota_upd", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_u8(nh, "first_boot", 0);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
         return ESP_OK;                  /* уже подтверждён */
     }
     esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
     if (e == ESP_OK) {
+        if (nvs_open("ota_upd", NVS_READWRITE, &nh) == ESP_OK) {
+            nvs_set_u8(nh, "first_boot", 0);
+            nvs_commit(nh);
+            nvs_close(nh);
+        }
         ESP_LOGI(TAG, "OTA: прошивка подтверждена, откат отменён");
     } else {
         ESP_LOGW(TAG, "OTA: confirm: 0x%x", e);

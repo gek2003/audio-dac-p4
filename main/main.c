@@ -304,6 +304,10 @@ static const char *ui_h_get_wifi_ssid(void) { return wifi_get_ssid(); }
 static void ui_h_set_source_url(const char *url)
 {
     if (!url || strlen(url) == 0) return;
+    /* P4c-5/P2-10: последний мутирующий хук без синхронизации — под мьютексом.
+     * decoder_request берёт только мьютекс очереди декодера; fade в его задаче
+     * ждёт хук-мьютекс уже после возврата httpd — ABBA-дедлока нет. */
+    if (!hook_lock()) return;
     snprintf(s_url, sizeof(s_url), "%s", url);
     persist_save_str(SRC_URL_NVS_KEY, s_url);
     /* Радио/HTTP-файл вне очереди: без сброса авто-переход мог бы утащить
@@ -318,6 +322,7 @@ static void ui_h_set_source_url(const char *url)
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "decoder_request(%s): %s", s_url, esp_err_to_name(e));
     }
+    hook_unlock();
 }
 
 static void ui_h_set_fir(int fir)
@@ -404,9 +409,11 @@ static void ui_h_play_pause(void)
         return;
     }
     if (s_url[0] == '\0') return;
-    esp_err_t e = decoder_start(s_url, DEC_TYPE_AUTO, false);
+    /* P4c-5/P2-11: хук зовётся и из httpd — прямой decoder_start блокирует
+     * его на 1-2 с; decoder_request асинхронен и сам гасит текущий источник. */
+    esp_err_t e = decoder_request(s_url, DEC_TYPE_AUTO, false);
     if (e != ESP_OK) {
-        ESP_LOGW(TAG, "decoder_start(%s): %s", s_url, esp_err_to_name(e));
+        ESP_LOGW(TAG, "decoder_request(%s): %s", s_url, esp_err_to_name(e));
     }
 }
 
@@ -528,7 +535,8 @@ static void msc_return_to_app(void)
     if (s_was_file_playing && strncmp(s_url, "file://", 7) == 0
         && !decoder_running()) {
         ESP_LOGI(TAG, "Возобновляю воспроизведение: %s", s_url);
-        esp_err_t e = decoder_start(s_url, DEC_TYPE_AUTO, false);
+        /* P4c-5/P2-11: асинхронный запуск из MSC-возврата, как из хуков. */
+        esp_err_t e = decoder_request(s_url, DEC_TYPE_AUTO, false);
         s_was_file_playing = (e == ESP_OK);
     }
 }

@@ -402,10 +402,10 @@ static void dsd_playback_loop(void)
             size_t n = dsd_read_raw(dsd, s_dec.out_buf, s_dec.out_buf_size, &eof);
             if (n == 0) break;
             if (dsd_native_write((const uint8_t *)s_dec.out_buf, n) != ESP_OK) break;
-            s_dec.samples += n / 2;   /* позиция для UI: n = байтов интерлива L,R */
+            s_dec.samples += n / 2;   /* позиция для UI: n = байтов интерлива L,R (по байту на канал); P4c/P1-3: счётчик подтверждён */
             if (eof) break;
         }
-        if (nat_paused) dsd_native_pause(false);
+        if (nat_paused && !s_dec.stop_requested) dsd_native_pause(false);   /* P4c/P1-2: стоп из паузы — поток не возобновляем */
         dsd_close(dsd);
         s_dec.dsd = NULL;
         dsd_native_stop();
@@ -685,7 +685,10 @@ esp_err_t decoder_start(const char *url, decoder_type_t type, bool is_stream_hin
     s_dec.type_override = eff_type;
     s_dec.stop_requested = false;
     s_dec.current_fs = 0;
-    i2s_out_set_paused(false);
+    /* P4c/P1-2: не будим PCM-порт при живом native (общие пины GPIO48/47) */
+    if (!dsd_native_running()) {
+        i2s_out_set_paused(false);
+    }
     dsd_fade_restore();   /* новый источник не должен начаться в mute/«вполсилы» */
 
     /* DSD-файлы (.dsf/.dff): источник не нужен — dsd_dec.c читает файл сам */
@@ -741,7 +744,10 @@ void decoder_stop(void)
 {
     s_dec.stop_requested = true;
     s_dec.paused = false;
-    i2s_out_set_paused(false);
+    /* P4c/P1-2: при живом native его порты не трогаем */
+    if (!dsd_native_running()) {
+        i2s_out_set_paused(false);
+    }
     phono_adc_stop();      /* ADC-источник: глушим задачу ДО удаления ringbuf */
     http_source_stop();
     int waited = 0;

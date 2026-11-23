@@ -17,10 +17,9 @@
  *  Память: буферы ответов выделяются один раз при старте из PSRAM (фолбэк —
  *  обычный heap); стек httpd 6 КБ.
  *
- *  Потокобезопасность: хуки не мьютексированы (как и для UI) — одновременный
- *  клик по UI и HTTP-запрос теоретически пересекутся на s_url; для домашнего
- *  плеера приемлемо (см. README, ограничения). Смена источника через
- *  decoder_stop/start блокирует httpd-таск до ~1-2 с — на UX пульта не влияет.
+ *  Потокобезопасность: мутирующие хуки мьютексированы в main.c (hook_lock —
+ *  P4c-5/P2-10); смена источника асинхронна — decoder_request ставит команду
+ *  в очередь декодера и не блокирует httpd-таск (P4c-5/P2-11).
  * ============================================================================
  */
 
@@ -325,8 +324,9 @@ static esp_err_t api_phono(httpd_req_t *req)
     if (s_hooks.set_source_url) {
         s_hooks.set_source_url("adc://");
     } else {
-        if (decoder_running()) decoder_stop();
-        decoder_start("adc://", DEC_TYPE_AUTO, false);
+        /* P4c-5/P2-11: асинхронный запуск — httpd не блокируется; decoder_stop
+         * не нужен: decoder_request сам гасит текущий источник. */
+        decoder_request("adc://", DEC_TYPE_AUTO, false);
     }
     send_json(req, "{\"ok\":true}", 200);
     return ESP_OK;
@@ -367,7 +367,8 @@ static esp_err_t api_dsd(httpd_req_t *req)
     }
     dsd_play_mode_set((dsd_play_mode_t)v);
     /* Namespace и ключ совпадают с persist в main.c: PERSIST_NVS_NAMESPACE
-     * ("dac") и DSD_MODE_NVS_KEY ("dsd_mode") — при старте читается оттуда же. */
+     * ("dac") и DSD_MODE_NVS_KEY ("dsd_mode") — при старте читается оттуда же.
+     * P4c-4/P2-9: сверено — namespace "dac" единый по всему проекту. */
     nvs_handle_t nh = 0;
     if (nvs_open("dac", NVS_READWRITE, &nh) == ESP_OK) {
         nvs_set_u8(nh, "dsd_mode", (uint8_t)v);

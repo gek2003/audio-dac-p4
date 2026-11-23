@@ -354,7 +354,9 @@ static esp_err_t dsd_dst_next_frame(dsd_ctx_t *ctx)
         if (memcmp(h12, "DSTF", 4) == 0) {
             if (sz > ctx->dst_fcap) return ESP_ERR_NO_MEM;
             if (fread(ctx->dst_fbuf, 1, (size_t)sz, ctx->f) != (size_t)sz) return ESP_ERR_NOT_FOUND;
-            if (sz & 1) fseek(ctx->f, 1, SEEK_CUR);
+            if (sz & 1) {
+                if (fseek(ctx->f, 1, SEEK_CUR) != 0) return ESP_ERR_NOT_FOUND;   /* P4c-3/P1-7: проверка позиционирования */
+            }
             size_t fb_total = (size_t)(ctx->dsd_rate / 75 / 8) * ctx->channels;
             esp_err_t e = dst_decode_frame(ctx->dst_dec, ctx->dst_fbuf, (size_t)sz, ctx->dst_out);
             if (e != ESP_OK) {
