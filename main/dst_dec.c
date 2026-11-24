@@ -266,13 +266,13 @@ dst_handle_t dst_open(uint32_t dsd_rate, uint8_t channels) {
     if (channels == 0 || channels > 2) return NULL;
     /* ISO/IEC 14496-3 допускает 64/128/256 × 44100; терпим кратность */
     if (dsd_rate < 2822400 || dsd_rate > 512 * 44100) return NULL;
-    if ((588ULL * ((uint64_t)dsd_rate * 8 / 44100)) & 7) return NULL;
+    if ((588ULL * ((uint64_t)dsd_rate / 44100)) & 7) return NULL;
 
     dst_handle_t s = calloc(1, sizeof(*s));
     if (s == NULL) return NULL;
     s->dsd_rate = dsd_rate;
     s->channels = channels;
-    s->samples_per_frame = 588u * (dsd_rate * 8 / 44100);
+    s->samples_per_frame = 588u * (dsd_rate / 44100);
     s->frame_bytes = s->samples_per_frame / 8 * channels;
     return s;
 }
